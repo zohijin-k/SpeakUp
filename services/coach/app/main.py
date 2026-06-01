@@ -18,6 +18,7 @@ from packages.schema import (
 )
 from .rules import evaluate as evaluate_window
 from .llm import generate, provider_info
+from .agent import AgentTriggerRequest, AgentFeedbackResponse, generate_agent_feedback
 
 app = FastAPI(title="Presentation Coach")
 
@@ -68,3 +69,40 @@ async def comprehensive(bundle: SessionBundle):
             },
             status_code=502,
         )
+
+
+@app.post("/agent-feedback", response_model=AgentFeedbackResponse)
+async def agent_feedback(req: AgentTriggerRequest):
+    """Real-time per-trigger nudge (≤30자, 한국어).
+
+    Browser fires this each time one of the agent triggers (silence, gaze,
+    smile_absence, motion_absence, filler, speech_rate, content) passes its
+    threshold + cooldown. We do a single small Gemini call and return a one-line
+    Korean message — or `null` to let the browser skip showing anything.
+    """
+    started = time.perf_counter()
+    try:
+        result = generate_agent_feedback(req)
+        elapsed = time.perf_counter() - started
+        if result.message:
+            print(
+                f"[agent-feedback] {req.kind} -> {result.tone or '?'} "
+                f"({elapsed*1000:.0f}ms): {result.message}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[agent-feedback] {req.kind} -> skip ({elapsed*1000:.0f}ms)",
+                flush=True,
+            )
+        return result
+    except Exception as e:
+        elapsed = time.perf_counter() - started
+        print(
+            f"[agent-feedback] {req.kind} failed ({elapsed*1000:.0f}ms) "
+            f"error={type(e).__name__}: {e}",
+            flush=True,
+        )
+        # Soft-fail: returning a 200 with null message keeps the browser quiet
+        # instead of throwing red errors on transient LLM hiccups.
+        return AgentFeedbackResponse(message=None, tone=None)

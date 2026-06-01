@@ -7,6 +7,10 @@
     <script>
       const savedTheme = localStorage.getItem('speakup-theme');
       document.documentElement.dataset.theme = savedTheme || 'light';
+      // Tag <html> so body+html height locks fire together. Selector
+      // approaches with :has() get inconsistent across browsers — a literal
+      // class is the safe bet.
+      document.documentElement.classList.add('agent-session-shell');
     </script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css" />
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/dist/tabler-icons.min.css" />
@@ -95,7 +99,8 @@
                 <select id="cam-select"></select>
               </label>
               <button id="btn-start" class="btn btn-ghost" disabled>카메라 준비 중</button>
-              <button id="btn-stop" class="btn btn-ghost" disabled>중지</button>
+              <button id="btn-pause" class="btn btn-ghost" disabled>일시정지</button>
+              <button id="btn-stop" class="btn btn-primary" disabled>제출</button>
             </section>
           </section>
         </section>

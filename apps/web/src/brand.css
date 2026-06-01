@@ -1556,13 +1556,44 @@ button.btn-primary {
   overflow: hidden;
 }
 
+/* Practice page = full-viewport app. We lock body/html height so the three
+ * inner columns (session list, video stage, agent chat) own their own scroll
+ * areas instead of pushing the whole page down. Other pages (report, loading,
+ * focus-selection) still use the normal document scroll because they don't
+ * carry the .agent-session-page hook on body. */
+html.agent-session-shell,
+body.agent-session-page {
+  height: 100vh;
+  overflow: hidden;
+}
+
+body.agent-session-page .container.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: min(1680px, calc(100vw - 16px));
+  padding: 0 0 8px;
+  gap: 8px;
+}
+
+body.agent-session-page .container.app-shell > header,
+body.agent-session-page .container.app-shell > .app-nav {
+  flex: 0 0 auto;
+}
+
 .agent-grid {
-  width: min(100%, 1680px);
-  height: 100%;
+  width: 100%;
   margin: 0 auto;
+  /* On the practice page agent-grid is the only thing that grows — fills the
+   * remaining height and lets its children handle their own overflow.
+   * grid-template-rows must be set explicitly: without it, the row sizes to
+   * the tallest child's content and overflow:hidden never actually triggers
+   * a scroll on the kids. */
+  flex: 1 1 0;
   min-height: 0;
   display: grid;
   grid-template-columns: clamp(190px, 15vw, 240px) minmax(0, 1fr) clamp(270px, 21vw, 340px);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   align-items: stretch;
   transition: grid-template-columns 0.18s ease;
@@ -1584,12 +1615,14 @@ button.btn-primary {
 .agent-sidebar {
   min-width: 0;
   min-height: 0;
+  /* Safety net for browsers where grid-track stretch doesn't kick in until
+   * an explicit child height — kept from the PR side. */
   height: 100%;
   overflow: hidden;
+  /* Two-row layout: head pinned, body fills + scrolls. */
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
-  align-content: stretch;
   padding: 14px;
   border: 0.5px solid var(--border);
   border-radius: var(--radius-lg);
@@ -1715,6 +1748,13 @@ button.btn-primary {
   min-height: 0;
   display: grid;
   gap: 8px;
+  /* Both lists live as the scrolling child of their sidebar's two-row grid.
+   * min-height: 0 is the magic that lets a grid track actually shrink so the
+   * overflow region can kick in instead of expanding the parent. */
+  min-height: 0;
+  overflow-y: auto;
+  align-content: start;
+  padding-right: 4px;
 }
 
 .agent-session-list {

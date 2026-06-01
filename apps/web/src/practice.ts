@@ -8,18 +8,30 @@ import {
 import { resolveAvatarUrl } from './avatar/registry';
 import { createLandmarkers, detect } from './mediapipe/landmarkers';
 import { AvatarRecorder } from './recorder/canvas-record';
-import {
-  RealtimeCoachingEngine,
-  selectCoachingCandidate,
-  type RealtimeCoachingCandidate,
-  type RealtimeFocusKey,
-} from './realtime-coaching';
 import { computeVisionFrame, resetSignalState, type VisionFrame } from './signals/compute';
 import { SilenceDetector } from './signals/silence';
 import { createAggregatorClient, createHudClient, type LiveHudResponse, type ProsodyFrame } from './ws/client';
 import { getCurrentProject, getProjectById } from './project-store';
 import { savePendingMedia, setPendingAnalysis, type LiveCoachingEvent } from './session-store';
 import { getActiveUser, listAgentMessages, listRemoteSessions, saveAgentMessage } from './app-api';
+import {
+  SilenceTrigger,
+  GazeTrigger,
+  SmileAbsenceTrigger,
+  MotionAbsenceTrigger,
+  FillerTrigger,
+  SpeechRateTrigger,
+  ContentTrigger,
+  countFillers,
+  type TriggerEvent,
+  type TriggerKind,
+} from './agent/triggers';
+import {
+  AgentDispatcher,
+  VisionContextBuffer,
+  TranscriptBuffer,
+  type MultimodalContext,
+} from './agent/dispatcher';
 
 type SpeechRecognitionAlternativeLike = {
   transcript: string;
@@ -66,6 +78,7 @@ const canvas = document.getElementById('avatar') as HTMLCanvasElement;
 const debug = document.getElementById('debug') as HTMLPreElement;
 const camSelect = document.getElementById('cam-select') as HTMLSelectElement;
 const btnStart = document.getElementById('btn-start') as HTMLButtonElement;
+const btnPause = document.getElementById('btn-pause') as HTMLButtonElement | null;
 const btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
 const recorded = document.getElementById('recorded') as HTMLVideoElement | null;
 const timerEl = document.querySelector('.timer') as HTMLDivElement | null;
@@ -132,13 +145,33 @@ const FOCUS_LABELS = {
   gesture: ['제스처', '자신감'],
 } as const;
 const AGENT_STT_CHUNK_MS = 4500;
-const GLOBAL_COACHING_COOLDOWN_SECONDS = 3.5;
 
-const agentNudgeAt = new Map<string, number>();
-const realtimeCoaching = new RealtimeCoachingEngine();
+type RealtimeFocusKey = keyof typeof FOCUS_LABELS;
+
+// ── New agent pipeline: triggers + dispatcher + multimodal context buffers ──
+// Each trigger owns its own thresholds + per-kind cooldown (see triggers.ts).
+// The dispatcher layers a global cooldown on top + the LLM call.
+const silenceTrigger = new SilenceTrigger();
+const gazeTrigger = new GazeTrigger();
+const smileAbsenceTrigger = new SmileAbsenceTrigger();
+const motionAbsenceTrigger = new MotionAbsenceTrigger();
+const fillerTrigger = new FillerTrigger();
+const speechRateTrigger = new SpeechRateTrigger();
+const contentTrigger = new ContentTrigger();
+const visionContextBuffer = new VisionContextBuffer();
+const transcriptBuffer = new TranscriptBuffer();
+let fillerTotal = 0;
+let agentDispatcher: AgentDispatcher | null = null;
+
 const liveCoachingEvents: LiveCoachingEvent[] = [];
 let currentSessionSeconds = 0;
-let lastGlobalNudgeAt = -Infinity;
+// Pause bookkeeping. While paused we freeze the session clock and skip every
+// trigger evaluation so cooldowns don't drain in the background. pausedAtTSec
+// holds the wall-clock instant we paused; pausedAccumSec is the total wall-time
+// already spent paused before *this* run.
+let paused = false;
+let pausedAtTSec = 0;
+let pausedAccumSec = 0;
 let liveCoachToastTimer = 0;
 let agentVoiceEnabled = localStorage.getItem('speakup-agent-voice') === 'true';
 let speechRecognition: SpeechRecognitionLike | null = null;
@@ -148,7 +181,8 @@ let speechChunkTimer = 0;
 let speechChunkSource: MediaStream | null = null;
 let speechChunkIndex = 0;
 let lastSpokenTranscriptKey = '';
-let lastSpeechAgentReplyAt = -Infinity;
+// Track the most recent silence reading for the dispatcher's multimodal context.
+let lastSilenceSeconds = 0;
 
 function focusEnabled(key: RealtimeFocusKey): boolean {
   if (focusSet.size === 0) return true;
@@ -258,26 +292,98 @@ function appendAgentMessage(
   }
 }
 
-function buildAgentAnswer(text: string, source: 'manual' | 'speech'): string {
-  const trimmed = text.trim();
-  const isQuestion = /[?？]|(어때|뭐가|어떻게|왜|괜찮|좋아|문제|고칠|될까|될까요|할까|할까요|맞아|맞나요|맞을까|괜찮을까|좋을까|봐줘|알려줘)/.test(trimmed);
-  const focusText = goals.length ? goals.join(', ') : '전체 흐름';
-  if (/안녕|반갑|소개|박진수/.test(trimmed)) {
-    return `들었습니다. 도입 인사는 자연스럽게 시작됐어요. 지금은 ${focusText} 중심으로 보고 있으니, 다음 문장은 카메라를 보면서 한 문장씩 끊어 말해보세요.`;
-  }
-  if (source === 'manual' || isQuestion) {
-    return `지금 세션에서는 ${focusText}를 기준으로 보고 있습니다. 녹화 중 잡히는 문제는 중앙 상단에 바로 띄우고, 질문에 대한 답변은 여기 대화창에 남겨둘게요.`;
-  }
-  return `방금 발화를 들었습니다. 계속 말해보세요. ${focusText} 기준으로 문제가 잡히면 중앙 상단에 짧게 코칭하겠습니다.`;
+// Snapshot helper — builds the multimodal context that we attach to every
+// dispatcher call. Kept here (not in dispatcher.ts) because it needs to read
+// browser-scoped state: the transcript buffer, current silence, focus goals.
+function buildMultimodalContext(event: TriggerEvent): MultimodalContext {
+  const vision = visionContextBuffer.snapshot();
+  // For content triggers, the "thing to evaluate" is the segment that fired
+  // the trigger. For other trigger kinds (silence/gaze/...), there's no single
+  // sentence under the microscope — we still pass current_utterance so the
+  // LLM has the latest line for situational awareness, but the focus is on
+  // the trigger itself.
+  const currentFromTrigger =
+    event.kind === 'content' && typeof event.payload.segment === 'string'
+      ? (event.payload.segment as string)
+      : '';
+  const current = currentFromTrigger || transcriptBuffer.currentUtterance();
+  const previous = transcriptBuffer.previousUtterances();
+  return {
+    recent_transcript: transcriptBuffer.recent(),
+    previous_utterances: previous,
+    current_utterance: current,
+    wpm: estimateRecentWpm(),
+    filler_count_total: fillerTotal,
+    recent_fillers: fillerTrigger['recentFillers']?.slice?.(-5) ?? [],
+    gaze_fixation_ratio_avg: vision.gaze_fixation_ratio_avg,
+    head_yaw_deg_avg: vision.head_yaw_deg_avg,
+    smile_intensity_avg: vision.smile_intensity_avg,
+    expression_change_rate_avg: vision.expression_change_rate_avg,
+    hand_velocity_max_avg: vision.hand_velocity_max_avg,
+    posture_sway_avg: vision.posture_sway_avg,
+    current_silence_seconds: lastSilenceSeconds > 0.5 ? lastSilenceSeconds : null,
+    session_elapsed_s: currentSessionSeconds,
+    recent_agent_messages: agentDispatcher?.recentMessages() ?? [],
+  };
 }
 
-function shouldAnswerSpokenText(text: string, sessionT: number): boolean {
-  const questionLike = /[?？]|(어때|뭐가|어떻게|왜|괜찮|좋아|문제|고칠|될까|될까요|할까|할까요|맞아|맞나요|맞을까|괜찮을까|좋을까|봐줘|알려줘|설명해줘|피드백)/.test(text);
-  if (!questionLike) return false;
-  return sessionT - lastSpeechAgentReplyAt >= 3;
+// Reuse SpeechRateTrigger's internal sample buffer to ballpark the WPM we send
+// in the context. The trigger itself decides when to *fire*; we only need the
+// number here for the LLM's awareness.
+function estimateRecentWpm(): number | null {
+  const samples = (speechRateTrigger as unknown as { samples?: Array<{ t: number; words: number }> }).samples;
+  if (!samples || samples.length === 0) return null;
+  const t = currentSessionSeconds;
+  const span = Math.max(t - samples[0].t, 5.0);
+  const totalWords = samples.reduce((sum, s) => sum + s.words, 0);
+  return (totalWords / span) * 60;
 }
 
+function onAgentFeedback(message: string, t: number, kind: TriggerKind, tone: string | null) {
+  appendAgentMessage('agent', message, t, { kind: 'agent_feedback', trigger: kind, tone });
+  speakAgentReply(message);
+  showLiveCoachToast(message, t);
+  liveCoachingEvents.push({
+    id: `agent_${kind}_${Math.floor(t * 1000)}`,
+    t,
+    duration_s: 0,
+    axis: triggerToAxis(kind),
+    key: kind,
+    level: tone === 'critique' ? 'warn' : tone === 'praise' ? 'info' : 'info',
+    title: kind,
+    message,
+    impact: tone === 'critique' ? -1 : tone === 'praise' ? 1 : 0,
+    metadata: { source: 'agent_dispatcher', tone },
+  });
+}
+
+function triggerToAxis(kind: TriggerKind): string {
+  switch (kind) {
+    case 'silence':
+    case 'speech_rate':
+      return 'delivery';
+    case 'gaze':
+      return 'gaze';
+    case 'smile_absence':
+      return 'expression';
+    case 'motion_absence':
+      return 'gesture';
+    case 'filler':
+      return 'delivery';
+    case 'content':
+      return 'logic';
+    default:
+      return 'overall';
+  }
+}
+
+// Final STT segment arrived → log it to the chat, push into the transcript +
+// speech-rate buffers, count fillers, then let the content trigger decide if
+// it wants to fire an LLM round.
 function handleSpokenText(text: string, confidence: number | null): void {
+  // Paused = no recording + no coaching. Drop the segment entirely; the next
+  // resume will re-arm STT and the user will see the timer pick back up.
+  if (paused) return;
   const transcript = text.replace(/\s+/g, ' ').trim();
   if (transcript.length < 2) return;
   const transcriptKey = transcript.replace(/[\s.,!?！？。]/g, '').toLowerCase();
@@ -288,11 +394,26 @@ function handleSpokenText(text: string, confidence: number | null): void {
     kind: 'spoken_transcript',
     confidence,
   });
-  if (!shouldAnswerSpokenText(transcript, sessionT)) return;
-  const answer = buildAgentAnswer(transcript, 'speech');
-  lastSpeechAgentReplyAt = sessionT;
-  appendAgentMessage('agent', answer, sessionT, { kind: 'spoken_answer' });
-  speakAgentReply(answer);
+  transcriptBuffer.add(transcript, sessionT);
+  speechRateTrigger.addUtterance(transcript, sessionT);
+
+  // Filler counting — feed each match into the trigger so it can fire on
+  // the next 5/10/15... threshold.
+  const { count, matched } = countFillers(transcript);
+  if (count > 0) {
+    fillerTotal += count;
+    matched.forEach((term) => fillerTrigger.noteFiller(term));
+    const fillerEvent = fillerTrigger.evaluate(fillerTotal, sessionT);
+    if (fillerEvent) agentDispatcher?.submit(fillerEvent);
+  }
+
+  // Speech rate — evaluate after the utterance is in the buffer.
+  const rateEvent = speechRateTrigger.evaluate(sessionT);
+  if (rateEvent) agentDispatcher?.submit(rateEvent);
+
+  // Content — LLM decides whether this utterance is worth a remark.
+  const contentEvent = contentTrigger.evaluate(transcript, sessionT);
+  if (contentEvent) agentDispatcher?.submit(contentEvent);
 }
 
 function chooseAgentAudioMimeType(): string {
@@ -431,51 +552,8 @@ function stopSpeechAgentListening(): void {
   }
 }
 
-function toLiveCoachingEvent(candidate: RealtimeCoachingCandidate, sessionT: number): LiveCoachingEvent {
-  return {
-    id: `live_${Math.round(sessionT * 1000)}_${candidate.key}`,
-    t: sessionT,
-    duration_s: candidate.duration_s,
-    axis: candidate.axis,
-    key: candidate.key,
-    level: candidate.level,
-    title: candidate.title,
-    message: candidate.message,
-    impact: candidate.impact,
-    metric: candidate.metric,
-    value: candidate.value,
-    window_seconds: candidate.window_seconds,
-    metadata: candidate.metadata,
-  };
-}
-
-function nudgeAgent(candidate: RealtimeCoachingCandidate, sessionT: number): void {
-  const last = agentNudgeAt.get(candidate.key) ?? -Infinity;
-  if (sessionT - last < candidate.cooldown_s) return;
-  if (sessionT - lastGlobalNudgeAt < GLOBAL_COACHING_COOLDOWN_SECONDS) return;
-  agentNudgeAt.set(candidate.key, sessionT);
-  lastGlobalNudgeAt = sessionT;
-  const event = toLiveCoachingEvent(candidate, sessionT);
-  liveCoachingEvents.push(event);
-  showLiveCoachToast(candidate.message, sessionT);
-  if (remoteSessionId) {
-    void saveAgentMessage({
-      session_id: remoteSessionId,
-      role: 'system',
-      content: candidate.message,
-      t: sessionT,
-      metadata: { kind: 'live_coaching_event', event },
-    }).catch((err) => {
-      console.warn('[agent] live coaching event save failed', err);
-    });
-  }
-}
-
-function emitCoachingCandidate(candidates: RealtimeCoachingCandidate[], sessionT: number): void {
-  const candidate = selectCoachingCandidate(candidates, focusEnabled);
-  if (!candidate) return;
-  nudgeAgent(candidate, sessionT);
-}
+// (Old realtime-coaching engine + nudgeAgent removed — replaced by the new
+//  trigger evaluators + AgentDispatcher pipeline above.)
 
 async function hydrateAgentPanel(): Promise<void> {
   const focusText = goals.length ? goals.join(', ') : '전체';
@@ -559,9 +637,15 @@ agentForm?.addEventListener('submit', (event) => {
   if (!text) return;
   appendAgentMessage('user', text, null, { kind: 'manual_question' });
   if (agentInput) agentInput.value = '';
-  const answer = buildAgentAnswer(text, 'manual');
-  appendAgentMessage('agent', answer, null, { kind: 'manual_answer' });
-  speakAgentReply(answer);
+  // Route manual questions through the same dispatcher as the realtime triggers
+  // — kind 'content' makes the LLM treat it as a one-off utterance to react to.
+  // Dispatcher will inject the multimodal context so the model still sees what
+  // the user has been doing nonverbally.
+  agentDispatcher?.submit({
+    kind: 'content',
+    t: currentSessionSeconds,
+    payload: { segment: text, manual: true },
+  });
 });
 
 agentVoiceToggle?.addEventListener('click', () => {
@@ -726,7 +810,6 @@ function syncHudFromResponse(payload: LiveHudResponse, recording: boolean): void
     if (focusEnabled('filler')) setHudCard('filler', '낮음', 18, 'ok');
   }
   if (focusEnabled('verbal')) setFocusAxis('verbal', verbalScore);
-  emitCoachingCandidate(realtimeCoaching.fromHud(payload), currentSessionSeconds);
 }
 
 function scoreNonverbalFrame(frame: VisionFrame): number {
@@ -812,16 +895,42 @@ async function bootstrap() {
     sessionId = remoteSessionId || `sess_${Date.now()}`;
     const focusGoals = resolveFocusGoals();
     resetSignalState();
-    realtimeCoaching.reset();
     liveCoachingEvents.length = 0;
-    agentNudgeAt.clear();
-    lastGlobalNudgeAt = -Infinity;
+    paused = false;
+    pausedAccumSec = 0;
+    pausedAtTSec = 0;
+    if (btnPause) {
+      btnPause.disabled = false;
+      btnPause.textContent = '일시정지';
+    }
+
+    // Reset every agent-pipeline piece so a re-record starts clean.
+    silenceTrigger.reset();
+    gazeTrigger.reset();
+    smileAbsenceTrigger.reset();
+    smileAbsenceTrigger.start(0);
+    motionAbsenceTrigger.reset();
+    motionAbsenceTrigger.start(0);
+    fillerTrigger.reset();
+    speechRateTrigger.reset();
+    contentTrigger.reset();
+    visionContextBuffer.reset();
+    transcriptBuffer.reset();
+    fillerTotal = 0;
+    lastSilenceSeconds = 0;
+    agentDispatcher = new AgentDispatcher({
+      scenario,
+      situation: situationName || projectName,
+      focusGoals,
+      getContext: buildMultimodalContext,
+      onFeedback: onAgentFeedback,
+    });
+
     await aggregator.start(sessionId, scenario, focusGoals);
     recorder.start(stream);
     silenceDetector = new SilenceDetector(stream);
     silenceDetector.start();
     recording = true;
-    lastSpeechAgentReplyAt = -Infinity;
     lastSpokenTranscriptKey = '';
     recordingStartTSec = performance.now() / 1000;
     lastSignalSendT = 0;
@@ -833,8 +942,34 @@ async function bootstrap() {
     setStatus(`녹화 중… (세션 ${sessionId})`);
   });
 
+  btnPause?.addEventListener('click', () => {
+    if (!recording) return;
+    if (!paused) {
+      // Pause: freeze the recorder + start the paused clock. Trigger evaluators
+      // see currentSessionSeconds stop advancing, so cooldowns don't drain
+      // during the break.
+      recorder.pause();
+      pausedAtTSec = performance.now() / 1000;
+      paused = true;
+      btnPause.textContent = '재개';
+      setRecordBadge('일시정지', 'idle');
+      setStatus('일시정지됨 — "재개"를 누르면 이어서 녹화합니다.');
+    } else {
+      // Resume: subtract the just-elapsed pause span from session time so the
+      // clock continues from where it stopped.
+      pausedAccumSec += performance.now() / 1000 - pausedAtTSec;
+      paused = false;
+      recorder.resume();
+      btnPause.textContent = '일시정지';
+      setRecordBadge('녹화 중', 'recording');
+      setStatus(`녹화 중… (세션 ${sessionId})`);
+    }
+  });
+
   btnStop.addEventListener('click', async () => {
     btnStop.disabled = true;
+    if (btnPause) btnPause.disabled = true;
+    paused = false;
     recording = false;
     stopSpeechAgentListening();
     if (silenceDetector) {
@@ -942,16 +1077,32 @@ async function bootstrap() {
         }
 
         if (recording) {
-          const sessionT = now / 1000 - recordingStartTSec;
+          // Paused sessions freeze the clock + skip every signal forward + every
+          // trigger evaluation. The recorder itself is paused at the MediaRecorder
+          // layer, and STT keeps running so the next resumption picks up cleanly.
+          if (paused) {
+            stage.render(delta);
+            requestAnimationFrame(tick);
+            return;
+          }
+          const sessionT = now / 1000 - recordingStartTSec - pausedAccumSec;
           currentSessionSeconds = sessionT;
           setTimer(sessionT);
           if (sessionT - lastSignalSendT >= 0.2) {
             const frame = computeVisionFrame(sessionT, face, pose, hand);
             aggregator.sendVision(frame);
-            realtimeCoaching.addVision(frame);
+            // Feed the context buffer + run the vision-side trigger evaluators.
+            visionContextBuffer.add(frame);
             const nonverbalScore = scoreNonverbalFrame(frame);
             if (focusEnabled('nonverbal')) setFocusAxis('nonverbal', nonverbalScore);
-            emitCoachingCandidate(realtimeCoaching.evaluateVision(sessionT), sessionT);
+            if (agentDispatcher) {
+              const gazeEvt = gazeTrigger.evaluate(frame, sessionT);
+              if (gazeEvt) agentDispatcher.submit(gazeEvt);
+              const smileEvt = smileAbsenceTrigger.evaluate(frame, sessionT);
+              if (smileEvt) agentDispatcher.submit(smileEvt);
+              const motionEvt = motionAbsenceTrigger.evaluate(frame, sessionT);
+              if (motionEvt) agentDispatcher.submit(motionEvt);
+            }
             lastSignalSendT = sessionT;
           }
           if (silenceDetector && sessionT - lastProsodySendT >= 1.0) {
@@ -963,7 +1114,7 @@ async function bootstrap() {
               rms_mean: rmsMean,
             };
             aggregator.sendProsody(prosodyFrame);
-            realtimeCoaching.addProsody(prosodyFrame);
+            lastSilenceSeconds = silenceSeconds;
             const tone = silenceSeconds >= 4 ? 'critical' : silenceSeconds >= 2 ? 'warn' : 'idle';
             if (focusEnabled('silence')) {
               setHudCard(
@@ -974,7 +1125,10 @@ async function bootstrap() {
               );
             }
             if (focusEnabled('prosody')) setFocusAxis('prosody', silenceSeconds >= 4 ? 48 : silenceSeconds >= 2 ? 72 : 86);
-            emitCoachingCandidate(realtimeCoaching.evaluateProsody(sessionT), sessionT);
+            if (agentDispatcher) {
+              const silEvt = silenceTrigger.evaluate(silenceSeconds, sessionT);
+              if (silEvt) agentDispatcher.submit(silEvt);
+            }
             silenceDetector.resetWindow();
             lastProsodySendT = sessionT;
           }

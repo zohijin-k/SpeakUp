@@ -17,6 +17,22 @@ export class AvatarRecorder {
   private startedAt = 0;
   private stoppedResolve: ((rec: AvatarRecording) => void) | null = null;
 
+  get state(): RecordingState {
+    return this.recorder?.state ?? 'inactive';
+  }
+
+  // Pause/resume mirror MediaRecorder's own methods. We don't try to subtract
+  // paused time from durationMs — the recorded webm's own metadata is the
+  // authoritative duration, and the UI computes paused-adjusted session time
+  // separately.
+  pause(): void {
+    if (this.recorder && this.recorder.state === 'recording') this.recorder.pause();
+  }
+
+  resume(): void {
+    if (this.recorder && this.recorder.state === 'paused') this.recorder.resume();
+  }
+
   // Records the user's MediaStream (video + audio) as-is. Pass the same stream
   // returned by getUserMedia — both tracks travel into the recorder together so
   // audio-video sync is whatever the browser captures, no extra plumbing needed.
