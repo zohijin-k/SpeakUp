@@ -1441,8 +1441,8 @@ button.btn-primary {
  * areas instead of pushing the whole page down. Other pages (report, loading,
  * focus-selection) still use the normal document scroll because they don't
  * carry the .agent-session-page hook on body. */
-body.agent-session-page,
-html:has(body.agent-session-page) {
+html.agent-session-shell,
+body.agent-session-page {
   height: 100vh;
   overflow: hidden;
 }
@@ -1451,6 +1451,7 @@ body.agent-session-page .container.app-shell {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  width: min(1680px, calc(100vw - 16px));
   padding: 0 0 8px;
   gap: 8px;
 }
@@ -1461,14 +1462,18 @@ body.agent-session-page .container.app-shell > .app-nav {
 }
 
 .agent-grid {
-  width: min(100%, 1680px);
+  width: 100%;
   margin: 0 auto;
   /* On the practice page agent-grid is the only thing that grows — fills the
-   * remaining height and lets its children handle their own overflow. */
+   * remaining height and lets its children handle their own overflow.
+   * grid-template-rows must be set explicitly: without it, the row sizes to
+   * the tallest child's content and overflow:hidden never actually triggers
+   * a scroll on the kids. */
   flex: 1 1 0;
   min-height: 0;
   display: grid;
   grid-template-columns: clamp(190px, 15vw, 240px) minmax(0, 1fr) clamp(270px, 21vw, 340px);
+  grid-template-rows: minmax(0, 1fr);
   gap: 14px;
   align-items: stretch;
   transition: grid-template-columns 0.18s ease;
