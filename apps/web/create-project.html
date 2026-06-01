@@ -72,15 +72,9 @@
             <span>세션 명</span>
             <input id="project-name" type="text" placeholder="예: 최종 면접 1차 리허설" />
           </label>
-          <input id="presentation-type" class="sr-select" value="presentation" />
-          <div class="scenario-grid compact" data-scenario-grid>
-            <button type="button" class="scenario-card is-selected" data-value="presentation"><i class="ti ti-presentation"></i><strong>발표</strong><span>청중 앞 전달력</span></button>
-            <button type="button" class="scenario-card" data-value="interview"><i class="ti ti-briefcase"></i><strong>면접</strong><span>답변 자신감</span></button>
-            <button type="button" class="scenario-card" data-value="negotiation"><i class="ti ti-handshake"></i><strong>협상</strong><span>근거와 톤</span></button>
-            <button type="button" class="scenario-card" data-value="daily"><i class="ti ti-message-circle"></i><strong>일상 대화</strong><span>편안한 흐름</span></button>
-            <button type="button" class="scenario-card" data-value="online"><i class="ti ti-device-laptop"></i><strong>전화·온라인</strong><span>비대면 집중감</span></button>
-            <button type="button" class="scenario-card" data-value="free"><i class="ti ti-sparkles"></i><strong>자유 연습</strong><span>오늘 필요한 말</span></button>
-          </div>
+          <p class="session-name-helper">
+            세션명에 적은 목적을 AI agent가 연습 맥락으로 사용합니다. 예: 경진대회 발표, 최종 면접, 협상 리허설
+          </p>
         </section>
 
         <section class="wizard-panel" data-step="2">
@@ -132,7 +126,6 @@
       const prevBtn = document.getElementById('prev-step');
       const startBtn = document.getElementById('start-session');
       const projectName = document.getElementById('project-name');
-      const typeInput = document.getElementById('presentation-type');
       const focusGroup = document.getElementById('focus-chip-group');
       const existingSelect = document.getElementById('existing-session-select');
       const existingDetail = document.getElementById('existing-session-detail');
@@ -140,8 +133,14 @@
       const passwordInput = document.getElementById('password');
       const displayNameInput = document.getElementById('display-name');
 
-      const labels = { presentation: '발표', interview: '면접', negotiation: '협상', daily: '일상 대화', online: '전화·온라인', free: '자유 연습' };
-      const scenarioMap = { presentation: 'presentation', interview: 'interview', negotiation: 'presentation', daily: 'casual', online: 'presentation', free: 'presentation' };
+      const scenarioMap = {
+        presentation: 'presentation',
+        interview: 'interview',
+        negotiation: 'presentation',
+        casual: 'casual',
+        online: 'presentation',
+        free: 'presentation',
+      };
       let mode = new URLSearchParams(location.search).get('mode') === 'existing' ? 'existing' : 'new';
       let step = getActiveUser() ? 1 : 0;
       let activeUser = getActiveUser();
@@ -174,6 +173,16 @@
         });
       }
 
+      function inferScenarioFromTitle(title) {
+        const text = title.replace(/\s+/g, '').toLowerCase();
+        if (/면접|인터뷰|interview/.test(text)) return 'interview';
+        if (/일상|대화|스몰토크|smalltalk|casual/.test(text)) return 'casual';
+        if (/전화|온라인|화상|비대면|zoom|meet/.test(text)) return 'online';
+        if (/협상|설득|영업|제안|negotiat|sales|pitch/.test(text)) return 'negotiation';
+        if (/자유|연습|free/.test(text)) return 'free';
+        return 'presentation';
+      }
+
       function syncModeButtons() {
         document.querySelectorAll('[data-mode-choice]').forEach((button) => {
           const active = button.dataset.modeChoice === mode;
@@ -195,7 +204,7 @@
         userChip.textContent = activeUser ? `${activeUser.display_name} · ${activeUser.email}` : '로그인이 필요합니다';
         const titles = {
           0: ['로그인하고 세션을 준비하세요', '계정 기준으로 세션과 리포트를 저장합니다.'],
-          1: ['세션에서 할 연습을 정하세요', '세션 이름과 연습 종류를 정하면 그 기준으로 실시간 코칭과 리포트가 만들어집니다.'],
+          1: ['세션에서 할 연습을 정하세요', '세션 이름을 정하면 그 내용을 기준으로 AI agent가 연습 맥락을 잡습니다.'],
           2: ['실시간 집중 포커스를 선택하세요', '선택한 항목만 AI agent가 우선적으로 관찰하고 코칭합니다.'],
           existing: ['기존 세션으로 이어서 시작하세요', '이전 목표와 포커스를 가져와 같은 흐름으로 연습합니다.'],
         };
@@ -259,7 +268,7 @@
             existingSessions.forEach((session) => {
               const option = document.createElement('option');
               option.value = session.id;
-              option.textContent = `${session.title} · ${labels[session.scenario] || session.scenario}`;
+              option.textContent = session.title;
               existingSelect.appendChild(option);
             });
           }
@@ -284,11 +293,9 @@
         existingDetail.textContent = '';
         const title = document.createElement('strong');
         title.textContent = selected.title;
-        const scenario = document.createElement('span');
-        scenario.textContent = labels[selected.scenario] || selected.scenario;
         const focus = document.createElement('em');
         focus.textContent = selected.focus_goals.join(', ') || '포커스 없음';
-        existingDetail.append(title, scenario, focus);
+        existingDetail.append(title, focus);
       }
 
       async function startSession() {
@@ -313,11 +320,13 @@
             }
           } else {
             if (!validateStep()) return;
+            const sessionTitle = projectName.value.trim();
+            const inferredScenario = inferScenarioFromTitle(sessionTitle);
             session = await saveRemoteSession({
               user_id: activeUser.id,
-              title: projectName.value.trim(),
-              scenario: typeInput.value,
-              situation: projectName.value.trim(),
+              title: sessionTitle,
+              scenario: inferredScenario,
+              situation: sessionTitle,
               focus_goals: getSelectedFocus(),
               source: 'live',
               status: 'ready',
@@ -364,14 +373,6 @@
           syncModeButtons();
           setError('');
           render();
-        });
-      });
-
-      document.querySelectorAll('[data-scenario-grid] .scenario-card').forEach((card) => {
-        card.addEventListener('click', () => {
-          document.querySelectorAll('.scenario-card').forEach((item) => item.classList.remove('is-selected'));
-          card.classList.add('is-selected');
-          typeInput.value = card.dataset.value;
         });
       });
 

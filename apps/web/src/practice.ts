@@ -8,11 +8,17 @@ import {
 import { resolveAvatarUrl } from './avatar/registry';
 import { createLandmarkers, detect } from './mediapipe/landmarkers';
 import { AvatarRecorder } from './recorder/canvas-record';
+import {
+  RealtimeCoachingEngine,
+  selectCoachingCandidate,
+  type RealtimeCoachingCandidate,
+  type RealtimeFocusKey,
+} from './realtime-coaching';
 import { computeVisionFrame, resetSignalState, type VisionFrame } from './signals/compute';
 import { SilenceDetector } from './signals/silence';
-import { createAggregatorClient, createHudClient, type LiveHudResponse } from './ws/client';
+import { createAggregatorClient, createHudClient, type LiveHudResponse, type ProsodyFrame } from './ws/client';
 import { getCurrentProject, getProjectById } from './project-store';
-import { savePendingMedia, setPendingAnalysis } from './session-store';
+import { savePendingMedia, setPendingAnalysis, type LiveCoachingEvent } from './session-store';
 import { getActiveUser, listAgentMessages, listRemoteSessions, saveAgentMessage } from './app-api';
 
 type SpeechRecognitionAlternativeLike = {
@@ -126,9 +132,13 @@ const FOCUS_LABELS = {
   gesture: ['제스처', '자신감'],
 } as const;
 const AGENT_STT_CHUNK_MS = 4500;
+const GLOBAL_COACHING_COOLDOWN_SECONDS = 3.5;
 
 const agentNudgeAt = new Map<string, number>();
+const realtimeCoaching = new RealtimeCoachingEngine();
+const liveCoachingEvents: LiveCoachingEvent[] = [];
 let currentSessionSeconds = 0;
+let lastGlobalNudgeAt = -Infinity;
 let liveCoachToastTimer = 0;
 let agentVoiceEnabled = localStorage.getItem('speakup-agent-voice') === 'true';
 let speechRecognition: SpeechRecognitionLike | null = null;
@@ -139,9 +149,8 @@ let speechChunkSource: MediaStream | null = null;
 let speechChunkIndex = 0;
 let lastSpokenTranscriptKey = '';
 let lastSpeechAgentReplyAt = -Infinity;
-let spokenUtteranceCount = 0;
 
-function focusEnabled(key: keyof typeof FOCUS_LABELS): boolean {
+function focusEnabled(key: RealtimeFocusKey): boolean {
   if (focusSet.size === 0) return true;
   return FOCUS_LABELS[key].some((label) => focusSet.has(label));
 }
@@ -263,11 +272,9 @@ function buildAgentAnswer(text: string, source: 'manual' | 'speech'): string {
 }
 
 function shouldAnswerSpokenText(text: string, sessionT: number): boolean {
-  spokenUtteranceCount += 1;
-  if (spokenUtteranceCount === 1) return true;
-  if (/[?？]|(어때|뭐가|어떻게|왜|괜찮|좋아|문제|고칠|될까|될까요|할까|할까요|맞아|맞나요|맞을까|괜찮을까|좋을까|봐줘|알려줘)/.test(text)) return true;
-  if (sessionT - lastSpeechAgentReplyAt >= 10) return true;
-  return false;
+  const questionLike = /[?？]|(어때|뭐가|어떻게|왜|괜찮|좋아|문제|고칠|될까|될까요|할까|할까요|맞아|맞나요|맞을까|괜찮을까|좋을까|봐줘|알려줘|설명해줘|피드백)/.test(text);
+  if (!questionLike) return false;
+  return sessionT - lastSpeechAgentReplyAt >= 3;
 }
 
 function handleSpokenText(text: string, confidence: number | null): void {
@@ -424,12 +431,50 @@ function stopSpeechAgentListening(): void {
   }
 }
 
-function nudgeAgent(key: string, content: string, sessionT: number, metadata: Record<string, unknown> = {}): void {
-  const last = agentNudgeAt.get(key) ?? -Infinity;
-  if (sessionT - last < 8) return;
-  agentNudgeAt.set(key, sessionT);
-  void metadata;
-  showLiveCoachToast(content, sessionT);
+function toLiveCoachingEvent(candidate: RealtimeCoachingCandidate, sessionT: number): LiveCoachingEvent {
+  return {
+    id: `live_${Math.round(sessionT * 1000)}_${candidate.key}`,
+    t: sessionT,
+    duration_s: candidate.duration_s,
+    axis: candidate.axis,
+    key: candidate.key,
+    level: candidate.level,
+    title: candidate.title,
+    message: candidate.message,
+    impact: candidate.impact,
+    metric: candidate.metric,
+    value: candidate.value,
+    window_seconds: candidate.window_seconds,
+    metadata: candidate.metadata,
+  };
+}
+
+function nudgeAgent(candidate: RealtimeCoachingCandidate, sessionT: number): void {
+  const last = agentNudgeAt.get(candidate.key) ?? -Infinity;
+  if (sessionT - last < candidate.cooldown_s) return;
+  if (sessionT - lastGlobalNudgeAt < GLOBAL_COACHING_COOLDOWN_SECONDS) return;
+  agentNudgeAt.set(candidate.key, sessionT);
+  lastGlobalNudgeAt = sessionT;
+  const event = toLiveCoachingEvent(candidate, sessionT);
+  liveCoachingEvents.push(event);
+  showLiveCoachToast(candidate.message, sessionT);
+  if (remoteSessionId) {
+    void saveAgentMessage({
+      session_id: remoteSessionId,
+      role: 'system',
+      content: candidate.message,
+      t: sessionT,
+      metadata: { kind: 'live_coaching_event', event },
+    }).catch((err) => {
+      console.warn('[agent] live coaching event save failed', err);
+    });
+  }
+}
+
+function emitCoachingCandidate(candidates: RealtimeCoachingCandidate[], sessionT: number): void {
+  const candidate = selectCoachingCandidate(candidates, focusEnabled);
+  if (!candidate) return;
+  nudgeAgent(candidate, sessionT);
 }
 
 async function hydrateAgentPanel(): Promise<void> {
@@ -663,12 +708,6 @@ function syncHudFromResponse(payload: LiveHudResponse, recording: boolean): void
     const tone = wpmSignal.level === 'critical' ? 'critical' : 'warn';
     if (focusEnabled('wpm')) {
       setHudCard('wpm', `${Math.round(wpm)} WPM`, Math.min(100, (wpm / 240) * 100), tone);
-      nudgeAgent(
-        'wpm',
-        wpm > 180 ? '말 속도가 빨라지고 있어요. 한 문장 끝에서 반 박자 쉬고 이어가세요.' : '말 속도가 조금 빠릅니다. 핵심 단어 앞에서 속도를 낮춰보세요.',
-        currentSessionSeconds,
-        { wpm },
-      );
     }
     verbalScore -= wpmSignal.level === 'critical' ? 34 : 18;
   } else {
@@ -681,15 +720,13 @@ function syncHudFromResponse(payload: LiveHudResponse, recording: boolean): void
     const tone = fillerSignal.level === 'critical' ? 'critical' : 'warn';
     if (focusEnabled('filler')) {
       setHudCard('filler', `${Math.round(count)}회`, Math.min(100, count * 20), tone);
-      nudgeAgent('filler', '필러 표현이 반복됩니다. 다음 문장은 바로 말하지 말고 짧게 숨을 고른 뒤 시작하세요.', currentSessionSeconds, {
-        filler_count: count,
-      });
     }
     verbalScore -= fillerSignal.level === 'critical' ? 28 : 14;
   } else {
     if (focusEnabled('filler')) setHudCard('filler', '낮음', 18, 'ok');
   }
   if (focusEnabled('verbal')) setFocusAxis('verbal', verbalScore);
+  emitCoachingCandidate(realtimeCoaching.fromHud(payload), currentSessionSeconds);
 }
 
 function scoreNonverbalFrame(frame: VisionFrame): number {
@@ -775,12 +812,15 @@ async function bootstrap() {
     sessionId = remoteSessionId || `sess_${Date.now()}`;
     const focusGoals = resolveFocusGoals();
     resetSignalState();
+    realtimeCoaching.reset();
+    liveCoachingEvents.length = 0;
+    agentNudgeAt.clear();
+    lastGlobalNudgeAt = -Infinity;
     await aggregator.start(sessionId, scenario, focusGoals);
     recorder.start(stream);
     silenceDetector = new SilenceDetector(stream);
     silenceDetector.start();
     recording = true;
-    spokenUtteranceCount = 0;
     lastSpeechAgentReplyAt = -Infinity;
     lastSpokenTranscriptKey = '';
     recordingStartTSec = performance.now() / 1000;
@@ -823,6 +863,7 @@ async function bootstrap() {
         filename: `${sessionId}.webm`,
         mimeType: rec.blob.type || 'video/webm',
         scenario,
+        liveEvents: liveCoachingEvents,
       });
       const next = new URL('loading.html', location.href);
       next.searchParams.set('session', sessionId);
@@ -907,40 +948,23 @@ async function bootstrap() {
           if (sessionT - lastSignalSendT >= 0.2) {
             const frame = computeVisionFrame(sessionT, face, pose, hand);
             aggregator.sendVision(frame);
+            realtimeCoaching.addVision(frame);
             const nonverbalScore = scoreNonverbalFrame(frame);
             if (focusEnabled('nonverbal')) setFocusAxis('nonverbal', nonverbalScore);
-            if (focusEnabled('gaze') && frame.gaze_fixation_ratio < 0.42) {
-              nudgeAgent('gaze', '시선이 정면에서 벗어나고 있어요. 다음 문장은 카메라 렌즈나 청중 중앙을 보고 말해보세요.', sessionT, {
-                gaze_fixation_ratio: frame.gaze_fixation_ratio,
-              });
-            }
-            if (focusEnabled('posture') && (frame.posture_sway > 0.08 || Math.abs(frame.head_roll_deg) > 10)) {
-              nudgeAgent('posture', '자세가 기울어졌습니다. 목을 살짝 세우고 어깨 선을 수평으로 맞춰보세요.', sessionT, {
-                posture_sway: frame.posture_sway,
-                head_roll_deg: frame.head_roll_deg,
-              });
-            }
-            if (focusEnabled('expression') && frame.expression_diversity < 0.08 && sessionT > 4) {
-              nudgeAgent('expression', '표정 변화가 적습니다. 핵심 문장을 말할 때 눈썹과 입꼬리를 조금 더 살려보세요.', sessionT, {
-                expression_diversity: frame.expression_diversity,
-              });
-            }
-            if (focusEnabled('gesture') && frame.hand_gesture_freq < 0.02 && sessionT > 6) {
-              nudgeAgent('gesture', '손동작이 거의 없습니다. 중요한 단어 하나에만 작게 손짓을 붙여보세요.', sessionT, {
-                hand_gesture_freq: frame.hand_gesture_freq,
-              });
-            }
+            emitCoachingCandidate(realtimeCoaching.evaluateVision(sessionT), sessionT);
             lastSignalSendT = sessionT;
           }
           if (silenceDetector && sessionT - lastProsodySendT >= 1.0) {
             const { silenceSeconds, rmsMean } = silenceDetector.snapshot();
-            aggregator.sendProsody({
+            const prosodyFrame: ProsodyFrame = {
               t_start: lastProsodySendT,
               t_end: sessionT,
               silence_seconds: silenceSeconds,
               rms_mean: rmsMean,
-            });
-            const tone = silenceSeconds >= 4 ? 'warn' : silenceSeconds >= 2 ? 'ok' : 'idle';
+            };
+            aggregator.sendProsody(prosodyFrame);
+            realtimeCoaching.addProsody(prosodyFrame);
+            const tone = silenceSeconds >= 4 ? 'critical' : silenceSeconds >= 2 ? 'warn' : 'idle';
             if (focusEnabled('silence')) {
               setHudCard(
                 'silence',
@@ -950,11 +974,7 @@ async function bootstrap() {
               );
             }
             if (focusEnabled('prosody')) setFocusAxis('prosody', silenceSeconds >= 4 ? 48 : silenceSeconds >= 2 ? 72 : 86);
-            if (focusEnabled('silence') && silenceSeconds >= 4) {
-              nudgeAgent('silence', '침묵이 길어졌어요. 다음 문장은 짧은 연결어로 다시 시작해보세요.', sessionT, {
-                silence_seconds: silenceSeconds,
-              });
-            }
+            emitCoachingCandidate(realtimeCoaching.evaluateProsody(sessionT), sessionT);
             silenceDetector.resetWindow();
             lastProsodySendT = sessionT;
           }

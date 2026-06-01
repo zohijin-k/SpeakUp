@@ -17,11 +17,28 @@ export interface SessionMeta {
   createdAt: string;
 }
 
+export interface LiveCoachingEvent {
+  id: string;
+  t: number;
+  duration_s: number;
+  axis: string;
+  key: string;
+  level: 'info' | 'warn' | 'critical';
+  title: string;
+  message: string;
+  impact: number;
+  metric?: string;
+  value?: number | string | boolean | null;
+  window_seconds?: number;
+  metadata?: Record<string, unknown>;
+}
+
 export interface CompletedSession extends SessionMeta {
   report: ComprehensiveReport;
   mediaId?: string;
   filename?: string;
   mimeType?: string;
+  liveEvents?: LiveCoachingEvent[];
 }
 
 export interface PendingAnalysis extends SessionMeta {
@@ -29,6 +46,7 @@ export interface PendingAnalysis extends SessionMeta {
   filename: string;
   mimeType: string;
   scenario: string;
+  liveEvents?: LiveCoachingEvent[];
 }
 
 interface StoredMedia {

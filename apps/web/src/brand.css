@@ -1367,6 +1367,17 @@ button.btn-primary {
   gap: 4px;
 }
 
+.session-name-helper {
+  margin: 0;
+  padding: 12px;
+  border: 0.5px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-soft);
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
 .focus-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
