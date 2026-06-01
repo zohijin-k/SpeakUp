@@ -78,6 +78,7 @@ const canvas = document.getElementById('avatar') as HTMLCanvasElement;
 const debug = document.getElementById('debug') as HTMLPreElement;
 const camSelect = document.getElementById('cam-select') as HTMLSelectElement;
 const btnStart = document.getElementById('btn-start') as HTMLButtonElement;
+const btnPause = document.getElementById('btn-pause') as HTMLButtonElement | null;
 const btnStop = document.getElementById('btn-stop') as HTMLButtonElement;
 const recorded = document.getElementById('recorded') as HTMLVideoElement | null;
 const timerEl = document.querySelector('.timer') as HTMLDivElement | null;
@@ -164,6 +165,13 @@ let agentDispatcher: AgentDispatcher | null = null;
 
 const liveCoachingEvents: LiveCoachingEvent[] = [];
 let currentSessionSeconds = 0;
+// Pause bookkeeping. While paused we freeze the session clock and skip every
+// trigger evaluation so cooldowns don't drain in the background. pausedAtTSec
+// holds the wall-clock instant we paused; pausedAccumSec is the total wall-time
+// already spent paused before *this* run.
+let paused = false;
+let pausedAtTSec = 0;
+let pausedAccumSec = 0;
 let liveCoachToastTimer = 0;
 let agentVoiceEnabled = localStorage.getItem('speakup-agent-voice') === 'true';
 let speechRecognition: SpeechRecognitionLike | null = null;
@@ -372,6 +380,9 @@ function triggerToAxis(kind: TriggerKind): string {
 // speech-rate buffers, count fillers, then let the content trigger decide if
 // it wants to fire an LLM round.
 function handleSpokenText(text: string, confidence: number | null): void {
+  // Paused = no recording + no coaching. Drop the segment entirely; the next
+  // resume will re-arm STT and the user will see the timer pick back up.
+  if (paused) return;
   const transcript = text.replace(/\s+/g, ' ').trim();
   if (transcript.length < 2) return;
   const transcriptKey = transcript.replace(/[\s.,!?！？。]/g, '').toLowerCase();
@@ -884,6 +895,13 @@ async function bootstrap() {
     const focusGoals = resolveFocusGoals();
     resetSignalState();
     liveCoachingEvents.length = 0;
+    paused = false;
+    pausedAccumSec = 0;
+    pausedAtTSec = 0;
+    if (btnPause) {
+      btnPause.disabled = false;
+      btnPause.textContent = '일시정지';
+    }
 
     // Reset every agent-pipeline piece so a re-record starts clean.
     silenceTrigger.reset();
@@ -923,8 +941,34 @@ async function bootstrap() {
     setStatus(`녹화 중… (세션 ${sessionId})`);
   });
 
+  btnPause?.addEventListener('click', () => {
+    if (!recording) return;
+    if (!paused) {
+      // Pause: freeze the recorder + start the paused clock. Trigger evaluators
+      // see currentSessionSeconds stop advancing, so cooldowns don't drain
+      // during the break.
+      recorder.pause();
+      pausedAtTSec = performance.now() / 1000;
+      paused = true;
+      btnPause.textContent = '재개';
+      setRecordBadge('일시정지', 'idle');
+      setStatus('일시정지됨 — "재개"를 누르면 이어서 녹화합니다.');
+    } else {
+      // Resume: subtract the just-elapsed pause span from session time so the
+      // clock continues from where it stopped.
+      pausedAccumSec += performance.now() / 1000 - pausedAtTSec;
+      paused = false;
+      recorder.resume();
+      btnPause.textContent = '일시정지';
+      setRecordBadge('녹화 중', 'recording');
+      setStatus(`녹화 중… (세션 ${sessionId})`);
+    }
+  });
+
   btnStop.addEventListener('click', async () => {
     btnStop.disabled = true;
+    if (btnPause) btnPause.disabled = true;
+    paused = false;
     recording = false;
     stopSpeechAgentListening();
     if (silenceDetector) {
@@ -1032,7 +1076,15 @@ async function bootstrap() {
         }
 
         if (recording) {
-          const sessionT = now / 1000 - recordingStartTSec;
+          // Paused sessions freeze the clock + skip every signal forward + every
+          // trigger evaluation. The recorder itself is paused at the MediaRecorder
+          // layer, and STT keeps running so the next resumption picks up cleanly.
+          if (paused) {
+            stage.render(delta);
+            requestAnimationFrame(tick);
+            return;
+          }
+          const sessionT = now / 1000 - recordingStartTSec - pausedAccumSec;
           currentSessionSeconds = sessionT;
           setTimer(sessionT);
           if (sessionT - lastSignalSendT >= 0.2) {
