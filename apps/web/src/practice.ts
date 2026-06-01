@@ -871,6 +871,10 @@ async function bootstrap() {
   resetFocusAxes();
 
   const recorder = new AvatarRecorder();
+  // Second recorder: same retarget pipeline already feeds the avatar canvas
+  // every frame. We tap its captureStream and combine it with the user's mic
+  // track so the saved blob plays back with audio in sync.
+  const avatarRecorder = new AvatarRecorder();
   const aggregator = createAggregatorClient();
   const hudClient = createHudClient();
   let recording = false;
@@ -928,6 +932,13 @@ async function bootstrap() {
 
     await aggregator.start(sessionId, scenario, focusGoals);
     recorder.start(stream);
+    // Avatar recording uses the canvas's captureStream as video + the user's
+    // mic track for audio. canvas.captureStream(30) gives us the VRM render
+    // at 30fps; we merge audio so the two saved blobs are independently
+    // playable.
+    const avatarStream = canvas.captureStream(30);
+    stream.getAudioTracks().forEach((track) => avatarStream.addTrack(track));
+    avatarRecorder.start(avatarStream);
     silenceDetector = new SilenceDetector(stream);
     silenceDetector.start();
     recording = true;
@@ -949,6 +960,7 @@ async function bootstrap() {
       // see currentSessionSeconds stop advancing, so cooldowns don't drain
       // during the break.
       recorder.pause();
+      avatarRecorder.pause();
       pausedAtTSec = performance.now() / 1000;
       paused = true;
       btnPause.textContent = '재개';
@@ -960,6 +972,7 @@ async function bootstrap() {
       pausedAccumSec += performance.now() / 1000 - pausedAtTSec;
       paused = false;
       recorder.resume();
+      avatarRecorder.resume();
       btnPause.textContent = '일시정지';
       setRecordBadge('녹화 중', 'recording');
       setStatus(`녹화 중… (세션 ${sessionId})`);
@@ -976,7 +989,9 @@ async function bootstrap() {
       silenceDetector.stop();
       silenceDetector = null;
     }
-    const rec = await recorder.stop();
+    // Stop both recorders in parallel; pause + stop are synchronous events
+    // on MediaRecorder so awaiting them together is safe.
+    const [rec, avatarRec] = await Promise.all([recorder.stop(), avatarRecorder.stop()]);
     if (recorded) recorded.src = rec.url;
     setTimer(rec.durationMs / 1000);
     setRecordBadge('녹화 완료', 'done');
@@ -985,6 +1000,14 @@ async function bootstrap() {
     try {
       setStatus('코칭 화면으로 이동 중…');
       const mediaId = await savePendingMedia(rec.blob, `${sessionId}.webm`, rec.blob.type || 'video/webm');
+      // Avatar version is optional — it's only there if captureStream + retarget
+      // produced any frames. If the user has no VRM (fallback face only) the
+      // blob is still present and just shows the fallback canvas.
+      const avatarFilename = `${sessionId}.avatar.webm`;
+      const avatarMimeType = avatarRec.blob.type || 'video/webm';
+      const avatarMediaId = avatarRec.blob.size > 0
+        ? await savePendingMedia(avatarRec.blob, avatarFilename, avatarMimeType)
+        : undefined;
       setPendingAnalysis({
         sessionId,
         projectId: projectRef?.id,
@@ -997,6 +1020,9 @@ async function bootstrap() {
         mediaId,
         filename: `${sessionId}.webm`,
         mimeType: rec.blob.type || 'video/webm',
+        avatarMediaId,
+        avatarFilename: avatarMediaId ? avatarFilename : undefined,
+        avatarMimeType: avatarMediaId ? avatarMimeType : undefined,
         scenario,
         liveEvents: liveCoachingEvents,
       });

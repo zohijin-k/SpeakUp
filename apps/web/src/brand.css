@@ -868,8 +868,16 @@ button.btn-primary {
   border-radius: 0;
 }
 
+/* The avatar canvas needs to keep rendering so its captureStream tracks
+ * have real frames — that's why we don't display:none it. We just push it
+ * off-screen instead. The retarget pipeline keeps drawing into it; the
+ * report page replays the captured stream when the user toggles
+ * "아바타로 보기". */
 #avatar {
-  display: none;
+  position: fixed;
+  left: -99999px;
+  top: 0;
+  pointer-events: none;
 }
 
 .record-badge,

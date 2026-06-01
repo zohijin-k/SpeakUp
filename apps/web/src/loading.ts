@@ -211,6 +211,9 @@ async function run() {
       mediaId: pending.mediaId,
       filename: pending.filename,
       mimeType: pending.mimeType,
+      avatarMediaId: pending.avatarMediaId,
+      avatarFilename: pending.avatarFilename,
+      avatarMimeType: pending.avatarMimeType,
       liveEvents: pending.liveEvents,
     });
     const activeUser = getActiveUser();

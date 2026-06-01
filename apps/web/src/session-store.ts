@@ -38,6 +38,11 @@ export interface CompletedSession extends SessionMeta {
   mediaId?: string;
   filename?: string;
   mimeType?: string;
+  // Second recording: same MediaStream re-rendered through the VRM avatar.
+  // Lets the report page swap the playback source to the avatar version.
+  avatarMediaId?: string;
+  avatarFilename?: string;
+  avatarMimeType?: string;
   liveEvents?: LiveCoachingEvent[];
 }
 
@@ -45,6 +50,9 @@ export interface PendingAnalysis extends SessionMeta {
   mediaId: string;
   filename: string;
   mimeType: string;
+  avatarMediaId?: string;
+  avatarFilename?: string;
+  avatarMimeType?: string;
   scenario: string;
   liveEvents?: LiveCoachingEvent[];
 }

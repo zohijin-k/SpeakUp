@@ -45,6 +45,11 @@ let reportMediaBlob: Blob | null = null;
 let reportMediaFilename = 'speakup-video.webm';
 let reportMediaMimeType = 'video/webm';
 let activeMomentTime = 0;
+// Toggle state for the "아바타로 보기" button. We cache the active session so
+// the toggle handler can re-attach without re-running the whole render flow.
+let avatarMode = false;
+let activeSession: CompletedSession | null = null;
+const avatarToggleLink = document.getElementById('avatar-toggle-link') as HTMLButtonElement | null;
 
 function syncThemeToggle() {
   if (!themeToggle) return;
@@ -58,6 +63,17 @@ themeToggle?.addEventListener('click', () => {
   document.documentElement.dataset.theme = nextTheme;
   localStorage.setItem('speakup-theme', nextTheme);
   syncThemeToggle();
+});
+
+avatarToggleLink?.addEventListener('click', async () => {
+  if (!activeSession) return;
+  avatarMode = !avatarMode;
+  avatarToggleLink.setAttribute('aria-pressed', String(avatarMode));
+  avatarToggleLink.textContent = avatarMode ? '원본 영상 보기' : '아바타로 보기';
+  await attachModalVideo(activeSession, avatarMode);
+  // Keep the timestamp the user was watching when they flipped the toggle.
+  // The two recordings start together so the timeline maps 1:1.
+  seekModalVideo(activeMomentTime);
 });
 
 document.getElementById('print-link')?.addEventListener('click', () => {
@@ -485,13 +501,27 @@ function renderExpertMetrics(session: CompletedSession) {
   }).join('');
 }
 
-async function attachModalVideo(session: ReturnType<typeof getCompletedSession>) {
-  if (!modalVideo || !modalVideoEmpty || !session?.mediaId) {
+async function attachModalVideo(
+  session: ReturnType<typeof getCompletedSession>,
+  useAvatar = false,
+) {
+  if (!session) {
     clearReportMedia();
     setModalVideoAvailable(false);
     return;
   }
-  const media = await loadPendingMedia(session.mediaId);
+  // Pick which recording to load. Toggle defaults to the raw user video; the
+  // avatar version is only attempted when explicitly requested AND the
+  // session actually has one stored.
+  const mediaId = useAvatar ? session.avatarMediaId : session.mediaId;
+  const fallbackFilename = useAvatar ? session.avatarFilename : session.filename;
+  const fallbackMimeType = useAvatar ? session.avatarMimeType : session.mimeType;
+  if (!modalVideo || !modalVideoEmpty || !mediaId) {
+    clearReportMedia();
+    setModalVideoAvailable(false);
+    return;
+  }
+  const media = await loadPendingMedia(mediaId);
   if (!media) {
     clearReportMedia();
     setModalVideoAvailable(false);
@@ -500,10 +530,10 @@ async function attachModalVideo(session: ReturnType<typeof getCompletedSession>)
   reportMediaBlob = media.blob;
   reportMediaFilename = getReportVideoFilename(
     session,
-    media.filename || session.filename || '',
-    media.mimeType || session.mimeType || media.blob.type || 'video/webm',
+    media.filename || fallbackFilename || '',
+    media.mimeType || fallbackMimeType || media.blob.type || 'video/webm',
   );
-  reportMediaMimeType = media.mimeType || session.mimeType || media.blob.type || 'video/webm';
+  reportMediaMimeType = media.mimeType || fallbackMimeType || media.blob.type || 'video/webm';
   setDownloadVideoAvailable(true);
   if (modalVideoUrl) URL.revokeObjectURL(modalVideoUrl);
   modalVideoUrl = URL.createObjectURL(media.blob);
@@ -679,7 +709,17 @@ async function render() {
   renderExpertMetrics(session);
   renderNextGoals(session);
   renderChart(session);
-  await attachModalVideo(session);
+  // Cache + show toggle only if this session actually has an avatar recording.
+  // Re-entry into render() (e.g. switching sessions) resets toggle state so
+  // the user always starts on the raw video.
+  activeSession = session;
+  avatarMode = false;
+  if (avatarToggleLink) {
+    avatarToggleLink.hidden = !session.avatarMediaId;
+    avatarToggleLink.setAttribute('aria-pressed', 'false');
+    avatarToggleLink.textContent = '아바타로 보기';
+  }
+  await attachModalVideo(session, false);
 
   const modalLines = [
     session.report.top_priorities[0]?.text,
