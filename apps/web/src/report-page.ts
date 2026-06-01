@@ -1,6 +1,15 @@
-import { deriveNextTarget, findPreviousSession, formatTimeShort, getDisplayAxisScores, getTopMoments } from './report-utils';
+import {
+  average,
+  deriveNextTarget,
+  findAxis,
+  findPreviousSession,
+  formatTimeShort,
+  getAxisScore,
+  getDisplayAxisScores,
+  getTopMoments,
+} from './report-utils';
 import type { AnnotatedMoment } from './review/types';
-import type { CompletedSession } from './session-store';
+import type { CompletedSession, LiveCoachingEvent } from './session-store';
 import { getCompletedSession, getCompletedSessions, loadPendingMedia } from './session-store';
 
 declare const Chart: any;
@@ -14,6 +23,12 @@ const currentScoreEl = document.getElementById('current-score') as HTMLElement |
 const targetScoreEl = document.getElementById('target-score') as HTMLElement | null;
 const deltaScoreEl = document.getElementById('delta-score') as HTMLElement | null;
 const summaryEl = document.getElementById('ai-summary') as HTMLElement | null;
+const priorityCard = document.getElementById('priority-card') as HTMLElement | null;
+const strengthCard = document.getElementById('strength-card') as HTMLElement | null;
+const nextActionCard = document.getElementById('next-action-card') as HTMLElement | null;
+const focusAnalysisList = document.getElementById('focus-analysis-list') as HTMLElement | null;
+const agentHistoryList = document.getElementById('agent-history-list') as HTMLElement | null;
+const expertMetricsGrid = document.getElementById('expert-metrics-grid') as HTMLElement | null;
 const nextGoalsList = document.getElementById('next-goals-list') as HTMLOListElement | null;
 const downloadVideoButton = document.getElementById('download-video-link') as HTMLButtonElement | null;
 const downloadMp4Button = document.getElementById('download-mp4-link') as HTMLButtonElement | null;
@@ -221,6 +236,255 @@ function setAxisCard(key: 'verbal' | 'prosody' | 'nonverbal', score: number | nu
   if (meter) meter.style.width = `${Math.max(0, Math.min(100, score ?? 0))}%`;
 }
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function inferPracticeContext(session: CompletedSession): {
+  label: string;
+  cue: string;
+  focusTone: string;
+} {
+  const raw = `${session.project} ${session.situation ?? ''} ${session.type}`.toLowerCase();
+  if (raw.includes('면접') || raw.includes('interview')) {
+    return {
+      label: '면접',
+      cue: '답변 신뢰감과 자연스러운 눈맞춤이 중요합니다.',
+      focusTone: '면접 상황에서는 안정감과 과하지 않은 반응이 핵심입니다.',
+    };
+  }
+  if (raw.includes('협상') || raw.includes('negotiation')) {
+    return {
+      label: '협상',
+      cue: '상대가 납득할 수 있는 근거 제시와 차분한 톤이 중요합니다.',
+      focusTone: '협상 상황에서는 강한 전달보다 균형 잡힌 설득력이 중요합니다.',
+    };
+  }
+  if (raw.includes('전화') || raw.includes('온라인') || raw.includes('online') || raw.includes('phone')) {
+    return {
+      label: '온라인/전화',
+      cue: '화면 밖에서도 명료하게 들리는 속도와 쉼이 중요합니다.',
+      focusTone: '비대면 상황에서는 말의 리듬과 음성 명료도가 더 크게 작용합니다.',
+    };
+  }
+  if (raw.includes('일상') || raw.includes('daily')) {
+    return {
+      label: '일상 대화',
+      cue: '편안한 흐름과 상대가 끼어들 수 있는 여백이 중요합니다.',
+      focusTone: '일상 대화에서는 자연스러운 반응과 부담 없는 속도가 중요합니다.',
+    };
+  }
+  if (raw.includes('논문')) {
+    return {
+      label: '논문 발표',
+      cue: '전문 용어를 또렷하게 전달하고 핵심 근거를 분명히 연결해야 합니다.',
+      focusTone: '논문 발표에서는 정확한 용어와 논리 연결이 평가 포인트입니다.',
+    };
+  }
+  return {
+    label: '발표',
+    cue: '청중이 따라오기 쉬운 속도, 시선, 핵심 메시지 전달이 중요합니다.',
+    focusTone: '발표 상황에서는 청중과의 연결감과 메시지 전달력이 중요합니다.',
+  };
+}
+
+const focusAxisMap: Record<string, string> = {
+  '말 속도': 'delivery',
+  '필러 표현': 'delivery',
+  '침묵 구간': 'delivery',
+  '목소리 톤': 'delivery',
+  '시선 처리': 'gaze',
+  자세: 'posture',
+  표정: 'expression',
+  제스처: 'gesture',
+  '논리 흐름': 'logic',
+  자신감: 'confidence',
+};
+
+const axisLabelMap: Record<string, string> = {
+  delivery: '말 전달',
+  gaze: '시선 처리',
+  posture: '자세',
+  expression: '표정',
+  gesture: '제스처',
+  logic: '논리 흐름',
+  confidence: '자신감',
+};
+
+function getSelectedFocus(session: CompletedSession): string[] {
+  const fallback = ['말 속도', '시선 처리', '필러 표현', '침묵 구간', '자세'];
+  const goals = session.goal.length ? session.goal : fallback;
+  return [...new Set(goals.map((goal) => goal.trim()).filter(Boolean))];
+}
+
+function getFocusAxis(focus: string): string {
+  return focusAxisMap[focus] ?? 'delivery';
+}
+
+function getFocusScore(session: CompletedSession, focus: string): number | null {
+  const axis = getFocusAxis(focus);
+  if (axis === 'confidence') {
+    return average([
+      getAxisScore(session.report, 'gaze'),
+      getAxisScore(session.report, 'posture'),
+      getAxisScore(session.report, 'expression'),
+    ]);
+  }
+  return getAxisScore(session.report, axis);
+}
+
+function matchesFocus(moment: AnnotatedMoment, focus: string): boolean {
+  const axis = getFocusAxis(focus);
+  const haystack = `${moment.axis} ${moment.title} ${moment.coach_comment ?? ''}`;
+  if (axis === moment.axis) return true;
+  if (focus.includes('필러')) return /필러|반복|음|어|그러니까/.test(haystack);
+  if (focus.includes('침묵')) return /침묵|무음|쉼/.test(haystack);
+  if (focus.includes('말 속도')) return /속도|wpm|느림|빠름/.test(haystack);
+  return haystack.includes(focus);
+}
+
+function pickFocusMoment(session: CompletedSession, focus: string): AnnotatedMoment | null {
+  return [...session.report.annotated_moments]
+    .filter((moment) => matchesFocus(moment, focus))
+    .sort((a, b) => a.impact - b.impact)[0] ?? null;
+}
+
+function focusContextComment(session: CompletedSession, focus: string, score: number | null): string {
+  const context = inferPracticeContext(session);
+  const level = typeof score === 'number' && score >= 80 ? '강점으로 유지할 수 있습니다' : '다음 연습에서 우선 확인할 필요가 있습니다';
+  if (focus === '시선 처리' && context.label === '면접') {
+    return `면접에서는 시선을 오래 고정하는 것보다 질문자를 자연스럽게 바라보는 균형이 중요합니다. 현재 ${focus}는 ${level}.`;
+  }
+  if (focus === '시선 처리' && context.label.includes('발표')) {
+    return `발표에서는 청중과 연결되는 느낌을 주는 정면 응시가 중요합니다. 현재 ${focus}는 ${level}.`;
+  }
+  if (focus === '말 속도') {
+    return `${context.label} 상황에서는 듣는 사람이 따라올 수 있는 리듬이 중요합니다. 현재 ${focus}는 ${level}.`;
+  }
+  if (focus === '논리 흐름') {
+    return `${context.label} 상황에서는 앞 문장과 다음 문장의 연결이 설득력을 만듭니다. 현재 ${focus}는 ${level}.`;
+  }
+  return `${context.focusTone} 현재 ${focus}는 ${level}.`;
+}
+
+function setCoachingCard(
+  card: HTMLElement | null,
+  label: string,
+  title: string,
+  body: string,
+) {
+  if (!card) return;
+  card.innerHTML = `
+    <span>${escapeHtml(label)}</span>
+    <strong>${escapeHtml(title)}</strong>
+    <p>${escapeHtml(body)}</p>
+  `;
+}
+
+function renderCoachingSummary(session: CompletedSession) {
+  const context = inferPracticeContext(session);
+  const priority = session.report.top_priorities[0];
+  const strength = session.report.strengths[0];
+  const nextDrill = session.report.training_prescriptions[0];
+  const nextText = nextDrill?.steps[0] ?? session.report.improvements[0]?.suggestion ?? '다음 연습에서는 가장 낮은 포커스부터 30초 단위로 다시 확인하세요.';
+
+  setCoachingCard(
+    priorityCard,
+    '먼저 고칠 점',
+    priority?.text ?? '우선순위 분석 대기',
+    priority?.suggestion ?? `${context.cue} 주의 구간 그래프에서 가장 크게 점수가 떨어진 지점을 먼저 확인하세요.`,
+  );
+  setCoachingCard(
+    strengthCard,
+    '잘한 점',
+    strength?.text ?? '유지할 강점 분석 대기',
+    strength?.suggestion ?? `${context.label} 상황에서 이미 안정적인 요소는 다음 세션에서도 유지하는 것이 좋습니다.`,
+  );
+  setCoachingCard(
+    nextActionCard,
+    '다음 연습 목표',
+    nextDrill?.title ?? '다음 행동',
+    nextText,
+  );
+}
+
+function renderFocusAnalysis(session: CompletedSession) {
+  if (!focusAnalysisList) return;
+  const rows = getSelectedFocus(session).map((focus) => {
+    const axis = getFocusAxis(focus);
+    const axisInfo = findAxis(session.report, axis === 'confidence' ? 'posture' : axis);
+    const score = getFocusScore(session, focus);
+    const moment = pickFocusMoment(session, focus);
+    const timeText = moment ? formatMomentRange(moment) : '전체';
+    const contextNote = focusContextComment(session, focus, score);
+    const metricNote = axisInfo?.note || moment?.coach_comment || '';
+    const body = metricNote ? `${contextNote} ${metricNote}` : contextNote;
+    return `
+      <article class="focus-analysis-item">
+        <span>${escapeHtml(axisLabelMap[axis] ?? focus)}</span>
+        <strong>${escapeHtml(focus)}</strong>
+        <div class="focus-analysis-score">${score === null ? '—' : `${Math.round(score)}점`}</div>
+        <p>${escapeHtml(body)}</p>
+        <em>${escapeHtml(timeText)}</em>
+      </article>
+    `;
+  });
+  focusAnalysisList.innerHTML = rows.length
+    ? rows.join('')
+    : '<div class="empty-copy">선택한 집중 포커스가 없어 기본 평가만 표시됩니다.</div>';
+}
+
+function renderAgentHistory(session: CompletedSession) {
+  if (!agentHistoryList) return;
+  const events = [...(session.liveEvents ?? [])]
+    .sort((a, b) => a.t - b.t)
+    .slice(0, 8);
+  if (!events.length) {
+    agentHistoryList.innerHTML = '<div class="empty-copy">이번 세션에 저장된 실시간 agent 코칭 기록이 없습니다.</div>';
+    return;
+  }
+  agentHistoryList.innerHTML = events.map((event: LiveCoachingEvent) => `
+    <article class="agent-history-item">
+      <span>${escapeHtml(event.axis || 'agent')}</span>
+      <strong>${escapeHtml(event.title)}</strong>
+      <div class="agent-history-time">${escapeHtml(formatTimeShort(event.t))}</div>
+      <p>${escapeHtml(event.message)}</p>
+    </article>
+  `).join('');
+}
+
+function renderExpertMetrics(session: CompletedSession) {
+  if (!expertMetricsGrid) return;
+  const report = session.report;
+  const metrics = [
+    { label: '말 속도/WPM', axis: 'delivery', fallback: '평균 말 속도와 필러, 긴 침묵을 함께 계산한 전달 지표입니다.' },
+    { label: '정면 응시 비율', axis: 'gaze', fallback: '카메라/정면을 바라본 비율을 기반으로 계산합니다.' },
+    { label: '필러 수', axis: 'delivery', fallback: '음, 어, 그러니까 등 반복 표현을 STT 구간에서 확인합니다.' },
+    { label: '침묵 시간', axis: 'delivery', fallback: '무음 또는 긴 쉼 구간을 누적해 확인합니다.' },
+    { label: '자세 흔들림', axis: 'posture', fallback: '어깨, 머리 기울임, 신체 안정성을 기반으로 계산합니다.' },
+    { label: '표정 변화량', axis: 'expression', fallback: '표정 다양성과 변화 흐름을 기반으로 계산합니다.' },
+    { label: '제스처 비율', axis: 'gesture', fallback: '손동작과 움직임 구간을 기반으로 계산합니다.' },
+    { label: '논리 흐름', axis: 'logic', fallback: '전사 텍스트 기반 구조 평가입니다.' },
+  ];
+  expertMetricsGrid.innerHTML = metrics.map((metric) => {
+    const axis = findAxis(report, metric.axis);
+    const score = axis?.available ? `${Math.round(axis.score)}점` : '—';
+    const note = axis?.note || metric.fallback;
+    return `
+      <article class="expert-metric-item">
+        <span>${escapeHtml(metric.label)}</span>
+        <strong>${escapeHtml(score)}</strong>
+        <p>${escapeHtml(note)}</p>
+      </article>
+    `;
+  }).join('');
+}
+
 async function attachModalVideo(session: ReturnType<typeof getCompletedSession>) {
   if (!modalVideo || !modalVideoEmpty || !session?.mediaId) {
     clearReportMedia();
@@ -377,7 +641,10 @@ async function render() {
     deltaScoreEl.textContent = `${delta >= 0 ? '+' : ''}${Math.round(delta)}`;
   }
   if (summaryEl) {
-    summaryEl.textContent = session.report.overall_summary || '이번 연습의 종합 코칭이 여기에 표시됩니다.';
+    const context = inferPracticeContext(session);
+    summaryEl.textContent = session.report.overall_summary
+      ? `${session.report.overall_summary} ${context.cue}`
+      : `이번 ${context.label} 연습은 ${goalText}를 중심으로 정리했습니다. ${context.cue}`;
   }
   if (retryLink) {
     const retryUrl = new URL('practice.html', location.href);
@@ -406,6 +673,10 @@ async function render() {
     session.report.top_priorities[0]?.suggestion || '시선, 자세, 표정 흐름을 함께 돌아봤어요.',
   );
 
+  renderCoachingSummary(session);
+  renderFocusAnalysis(session);
+  renderAgentHistory(session);
+  renderExpertMetrics(session);
   renderNextGoals(session);
   renderChart(session);
   await attachModalVideo(session);
