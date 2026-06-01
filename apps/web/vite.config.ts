@@ -32,6 +32,11 @@ export default defineConfig({
         ws: true,
         changeOrigin: true,
       },
+      '/ws/hud': {
+        target: 'ws://localhost:8001',
+        ws: true,
+        changeOrigin: true,
+      },
       // aggregator REST — must be proxied or fetch() lands on the SPA's index.html
       '/session': {
         target: 'http://localhost:8001',
@@ -44,6 +49,14 @@ export default defineConfig({
       },
       '/api/coach': {
         target: 'http://localhost:8002',
+        changeOrigin: true,
+        // Strip the /api/coach prefix so calls to /api/coach/agent-feedback land
+        // on coach's /agent-feedback route, not /api/coach/agent-feedback.
+        rewrite: (path) => path.replace(/^\/api\/coach/, ''),
+      },
+      // audio-pipeline app-api routes: /api/auth/*, /api/sessions/*, /api/health/db
+      '/api': {
+        target: 'http://localhost:8000',
         changeOrigin: true,
       },
     },
