@@ -1,12 +1,13 @@
 import { uploadForAnalysis } from './audio-upload';
 import { createLandmarkers } from './mediapipe/landmarkers';
 import { touchProject } from './project-store';
-import type { ComprehensiveReport } from './review/types';
+import type { AnnotatedMoment, ComprehensiveReport, QualityLevel } from './review/types';
 import {
   clearPendingAnalysis,
   getPendingAnalysis,
   loadPendingMedia,
   saveCompletedSession,
+  type LiveCoachingEvent,
 } from './session-store';
 import { analyzeUploadedVideo } from './upload-analyze';
 import { getActiveUser, saveRemoteSession } from './app-api';
@@ -110,6 +111,43 @@ function redirectToReport(sessionId: string) {
   location.href = next.toString();
 }
 
+function qualityFromLiveEvent(level: LiveCoachingEvent['level']): QualityLevel {
+  if (level === 'critical') return 'mistake';
+  if (level === 'warn') return 'inaccuracy';
+  return 'good';
+}
+
+function liveEventToMoment(event: LiveCoachingEvent): AnnotatedMoment {
+  return {
+    t: event.t,
+    axis: event.axis,
+    quality: qualityFromLiveEvent(event.level),
+    title: event.title,
+    impact: event.impact,
+    coach_comment: event.message,
+    duration_s: event.duration_s,
+  };
+}
+
+function mergeLiveEventsIntoReport(report: ComprehensiveReport, liveEvents: LiveCoachingEvent[] = []): ComprehensiveReport {
+  if (liveEvents.length === 0) return report;
+  const existingKeys = new Set(
+    (report.annotated_moments ?? []).map((moment) => `${Math.round(moment.t)}:${moment.axis}:${moment.title}`),
+  );
+  const liveMoments = liveEvents
+    .map(liveEventToMoment)
+    .filter((moment) => {
+      const key = `${Math.round(moment.t)}:${moment.axis}:${moment.title}`;
+      if (existingKeys.has(key)) return false;
+      existingKeys.add(key);
+      return true;
+    });
+  return {
+    ...report,
+    annotated_moments: [...(report.annotated_moments ?? []), ...liveMoments].sort((a, b) => a.t - b.t),
+  };
+}
+
 async function run() {
   syncThemeToggle();
   const pending = getPendingAnalysis();
@@ -158,6 +196,7 @@ async function run() {
     if (!report) {
       throw new Error('코칭 결과를 받지 못했습니다.');
     }
+    report = mergeLiveEventsIntoReport(report, pending.liveEvents);
 
     saveCompletedSession({
       sessionId: pending.sessionId,
@@ -172,6 +211,7 @@ async function run() {
       mediaId: pending.mediaId,
       filename: pending.filename,
       mimeType: pending.mimeType,
+      liveEvents: pending.liveEvents,
     });
     const activeUser = getActiveUser();
     if (activeUser) {
