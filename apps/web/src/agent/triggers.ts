@@ -32,10 +32,12 @@ export interface TriggerEvent {
 }
 
 // ── Threshold / cooldown constants (sec) ──
-// All chosen by the spec: continuous-state triggers need 5s of sustained
-// signal before firing, and 5s before they can fire again.
-const SUSTAIN_S = 5.0;
-const RATE_LIMIT_S = 5.0;
+// Spec says 5s but in practice that yields "feedback hell" — multiple
+// nonverbal triggers stacking on top of content reactions. Push the
+// continuous-state ones out to 7s so they only fire when truly sustained,
+// and let the user lean on content/reaction events as the main rhythm.
+const SUSTAIN_S = 7.0;
+const RATE_LIMIT_S = 7.0;
 
 // Gaze: head yaw magnitude > 20° OR gaze_fixation_ratio collapsed to ~0 counts
 // as "looking away". 20° is roughly when a viewer reads it as a clear turn —
@@ -62,9 +64,11 @@ const WPM_TOO_SLOW = 70;
 const FILLER_STEP = 5;
 
 // Content trigger: keep STT segments at least this long; shorter ones aren't
-// worth a full LLM round-trip.
+// worth a full LLM round-trip. Interval is tight (1.5s) so the agent can
+// react ~live; the global dispatcher cooldown (2s) and model-side
+// "stay quiet on plain utterances" are the real throttle.
 const CONTENT_MIN_LEN = 8;
-const CONTENT_MIN_INTERVAL_S = 4.0;
+const CONTENT_MIN_INTERVAL_S = 1.5;
 
 // ── Continuous-state triggers ─────────────────────────────────────────────
 

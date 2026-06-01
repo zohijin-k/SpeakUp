@@ -38,6 +38,9 @@ export interface MultimodalContext {
   current_silence_seconds: number | null;
   // Session position
   session_elapsed_s: number;
+  // Self-history (anti-repetition) — what *we* (the agent) just said. Lets the
+  // backend prompt the model with "don't say something like these again."
+  recent_agent_messages: string[];
 }
 
 export interface AgentDispatcherCtx {
@@ -58,15 +61,26 @@ interface AgentFeedbackResponse {
 // over itself when several triggers fire in a tight cluster.
 const GLOBAL_COOLDOWN_S = 2.0;
 
+// How many of the agent's own recent messages to expose for anti-repetition.
+const SELF_HISTORY_LEN = 5;
+
 export class AgentDispatcher {
   // Per-trigger-kind in-flight tracking: while the model is still answering
   // a silence event, don't fire a second silence request.
   private inflight = new Set<TriggerKind>();
   private lastEmitT = -Infinity;
+  // What we (the agent) have actually said to the user in this session,
+  // oldest → newest. Exposed in the multimodal context so the prompt can
+  // tell the model not to repeat itself.
+  private selfHistory: string[] = [];
   private ctx: AgentDispatcherCtx;
 
   constructor(ctx: AgentDispatcherCtx) {
     this.ctx = ctx;
+  }
+
+  recentMessages(): string[] {
+    return this.selfHistory.slice(-SELF_HISTORY_LEN);
   }
 
   // Returns true if the event was accepted for dispatch. Callers can use the
@@ -105,6 +119,8 @@ export class AgentDispatcher {
       if (!msg) return; // model chose to stay silent — that's fine
       // Only update the global cooldown when we actually emit something.
       this.lastEmitT = event.t;
+      this.selfHistory.push(msg);
+      if (this.selfHistory.length > 20) this.selfHistory.shift();
       this.ctx.onFeedback(msg, event.t, event.kind, json.tone ?? null);
     } catch (err) {
       console.warn('[agent] dispatcher: feedback call failed', err);
@@ -116,6 +132,7 @@ export class AgentDispatcher {
   reset() {
     this.inflight.clear();
     this.lastEmitT = -Infinity;
+    this.selfHistory = [];
   }
 }
 

@@ -70,6 +70,12 @@ class MultimodalContext(BaseModel):
     # ── Session position ──
     session_elapsed_s: Optional[float] = None        # how far into the practice we are
 
+    # ── Self-history (anti-repetition) ──
+    # The last few messages the agent has actually sent to the user, oldest →
+    # newest. The model is told to avoid echoing these so we don't get the
+    # same reaction twice in a row.
+    recent_agent_messages: List[str] = Field(default_factory=list)
+
 
 class AgentTriggerRequest(BaseModel):
     kind: TriggerKind
@@ -127,21 +133,26 @@ def _trigger_brief(req: AgentTriggerRequest) -> str:
 def _trigger_directive(kind: TriggerKind) -> str:
     """What the LLM should *do* for this kind. Keeps the model focused."""
     if kind == "silence":
-        return "침묵이 의도된 강조인지 단순 멈춤인지는 알 수 없으니, 자연스럽게 흐름을 다시 잡으라고 한 줄로 권유."
+        return "꽤 길게 멈춰있어. 흐름 다시 잡으라고 부드럽게 짧게 한 마디."
     if kind == "gaze":
-        return "청자(카메라/대화 상대)와의 시선 연결을 한 줄로 권유."
+        return "시선이 오래 떠나 있어. 청자와 다시 눈 맞추라고 짧게 한 마디."
     if kind == "smile_absence":
-        return "표정이 굳어있다는 점을 부드럽게 환기. 상황에 맞으면 미소를, 진지한 상황이면 다른 표정 변화를 권유."
+        return "표정이 굳어있어. 부담 없이 환기. 상황에 안 맞는 미소 권유는 금지."
     if kind == "motion_absence":
-        return "몸이 너무 정지해 있다는 점을 짧게 환기. 자연스러운 손짓이나 자세 변화를 권유."
+        return "몸이 정지해 있어. 자연스러운 손짓·자세 변화를 가볍게."
     if kind == "filler":
-        return "필러가 누적되고 있음을 부담스럽지 않게 알리고, 잠깐 호흡 또는 짧은 쉼을 권유."
+        return "필러가 누적돼. 부담 없이 알리고 짧은 호흡 권유."
     if kind == "speech_rate":
-        return "말 속도가 너무 빠르거나 너무 느린지 판단해 짧게 조정 권유."
+        return "말 속도가 비정상이야. 짧게 조정 권유."
     if kind == "content":
         return (
-            "방금 발화가 이 상황(situation)에 적절한지 판단. 매우 좋으면 짧은 칭찬, "
-            "어휘/말투/구성에 분명한 개선점이 있으면 한 줄 지적. 둘 다 아니면 message를 null로."
+            "**중요: 이건 코칭이 아니라 함께 듣고 있는 친구의 자연스러운 리액션이야.**\n"
+            "- 방금 발화 내용에 맞장구치거나 ('오~ 그 부분 진짜 그래', '아, 그런 시각도 있구나'), "
+            "공감하거나, 잘한 표현 발견하면 짧게 칭찬해줘 ('완벽한 인사야', '딱 맞는 표현이야').\n"
+            "- 비판/지적은 정말로 명백히 부적절할 때만 (예: 면접인데 무례한 표현). "
+            "그것도 아주 가끔, 부드럽게.\n"
+            "- 평이한 발화면 굳이 끼어들지 말고 message를 null로. 매번 반응하면 짜증나.\n"
+            "- 사용자가 직접 입력한 질문(manual:true)이면 그 질문에 답해줘."
         )
     return "상황에 맞게 한 줄로 반응."
 
@@ -158,29 +169,27 @@ def _system_prompt(req: AgentTriggerRequest) -> str:
         else "특별히 명시된 포커스는 없음."
     )
     return (
-        "당신은 한국어 실시간 발화 코치입니다. "
-        "사용자가 연습 중인 상황(situation)을 잘 알고, 매 순간 함께 받는 "
-        "멀티모달 컨텍스트 — 직전 발화 흐름(언어) + 시선/표정/제스처/말속도/침묵 "
-        "(비언어) — 을 종합적으로 보면서 코칭하는 옆 코치입니다.\n"
+        "당신은 사용자가 발표 연습할 때 **옆에서 같이 듣고 있는 친구**입니다. "
+        "선생님이 아니에요. 평가하거나 채점하는 사람이 아닙니다. "
+        "그냥 자연스럽게 듣다가 마음 가는 순간에 반응합니다.\n"
         f"{situation_line}\n{focus_line}\n"
-        "발화 컨텍스트 구조 (중요):\n"
-        "- '직전 발화'는 흐름 파악용 맥락일 뿐 — 이미 지나간 문장이라 절대 코칭 대상 아님.\n"
-        "- '가장 최근 발화'는 방금 막 끝난 한 문장 — content 트리거에서는 이 한 줄만 평가 대상.\n"
-        "- 다른 트리거(silence/gaze/...)에서는 발화가 평가 대상이 아니라, 비언어 신호가 주된 평가 대상.\n"
-        "핵심 원칙:\n"
-        "- 트리거는 '지금 주목할 단서'일 뿐, 항상 멀티모달 컨텍스트와 함께 판단할 것.\n"
-        "  예: 침묵 트리거여도 최근 발화가 좋은 호흡 마무리였다면 칭찬할 수도 있고, "
-        "    표정이 어둡고 시선까지 흔들리면 묶어서 짚을 수도 있다.\n"
-        "- 상황(situation)에 맞는 어휘/톤으로 말할 것 (논문 발표=학술 청중, 면접=면접관, "
-        "  소개팅=상대 1명 등).\n"
-        "- 한 신호만 보고 단정하지 말 것. 비언어 컨텍스트가 정상이면 침묵 한 번을 "
-        "  굳이 지적하지 않아도 됨.\n"
-        "- 직전 발화에 대해 뒤늦게 코멘트하지 말 것. 평가는 항상 '지금 이 시점'의 트리거나 "
-        "  '가장 최근 발화'에 대해서.\n"
+        "받는 정보:\n"
+        "- 사용자가 방금 말한 문장 (current_utterance)\n"
+        "- 그 직전 흐름 (previous_utterances — 맥락용)\n"
+        "- 시선/표정/제스처/말속도/침묵 같은 비언어 신호\n"
+        "- 트리거 종류 — '지금 왜 호출됐는지' 단서일 뿐, 무조건 그것만 보지 마.\n"
+        "리액션 톤 (가장 중요):\n"
+        "- **친구 톤**: '오~', '아 진짜', '와 그러네', '맞아 맞아', '음 그렇구나' 같은 추임새 OK.\n"
+        "- **공감/맞장구**가 기본. 잘 들은 것처럼 반응해줘 — '컴공 코딩 필수 맞지', '그 시각 흥미롭다'.\n"
+        "- 가끔 **칭찬** — 인사 자연스러우면 '인사 깔끔해', 비유 좋으면 '비유 좋네' 정도.\n"
+        "- **코치 톤 금지**: '~해보자', '~좀 어때?', '~을 권장해요' 같은 말 X. 평가하지 마.\n"
+        "- 침묵/시선/필러 같은 비언어 트리거에서는 짧게 환기 정도 — 한 줄, 부담 없이.\n"
         "응답 규칙:\n"
-        "- 반드시 한 문장, 30자 이내, 한국어 반말체, 따뜻한 톤.\n"
-        "- 자명한 사실 나열 금지. '~좀 어때?', '~해보자' 같은 코치 톤.\n"
-        "- 굳이 말할 필요 없으면 message를 null로.\n"
+        "- 한국어 반말, 한 문장, 30자 이내.\n"
+        "- 자명한 사실 나열 금지. '말씀하셨네요', '말씀이 빠르네요' 같은 거 X.\n"
+        "- 평이한 발화엔 굳이 반응 안 해도 돼. message를 null로.\n"
+        "- recent_agent_messages에 있는 표현 다시 쓰지 마. 같은 말 두 번 안 함.\n"
+        "- 매번 반응하면 짜증. 의미 있을 때만.\n"
         f"{_FEEDBACK_SCHEMA_HINT}"
     )
 
@@ -235,6 +244,10 @@ def _format_context(ctx: "MultimodalContext") -> str:
     # Session position
     if ctx.session_elapsed_s is not None:
         lines.append(f"- 세션 시작 후 경과: {ctx.session_elapsed_s:.0f}초")
+    # Self-history — prevents the same reaction twice in a row.
+    if ctx.recent_agent_messages:
+        recent_lines = "\n".join(f'    · "{m}"' for m in ctx.recent_agent_messages[-5:])
+        lines.append(f"- 내가 방금 했던 말 (이거랑 비슷한 거 다시 하지 마):\n{recent_lines}")
     return "\n".join(lines) if lines else "(추가 컨텍스트 없음)"
 
 

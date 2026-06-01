@@ -323,6 +323,7 @@ function buildMultimodalContext(event: TriggerEvent): MultimodalContext {
     posture_sway_avg: vision.posture_sway_avg,
     current_silence_seconds: lastSilenceSeconds > 0.5 ? lastSilenceSeconds : null,
     session_elapsed_s: currentSessionSeconds,
+    recent_agent_messages: agentDispatcher?.recentMessages() ?? [],
   };
 }
 
