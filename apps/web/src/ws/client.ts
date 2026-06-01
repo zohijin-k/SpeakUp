@@ -45,6 +45,23 @@ export interface HudClient {
   close(): void;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function errorTextFromPayload(payload: unknown, status: number): string {
+  if (isRecord(payload)) {
+    if (typeof payload.error === 'string') return payload.error;
+    if (typeof payload.body_preview === 'string') return payload.body_preview;
+    const coachResponse = payload.coach_response;
+    if (isRecord(coachResponse)) {
+      if (typeof coachResponse.error === 'string') return coachResponse.error;
+      if (typeof coachResponse.detail === 'string') return coachResponse.detail;
+    }
+  }
+  return `리포트 생성 서버가 ${status} 상태를 반환했습니다.`;
+}
+
 export async function finalizeSession(
   sessionId: string,
   audioResult?: AudioAnalysisResult | null,
@@ -62,10 +79,23 @@ export async function finalizeSession(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    return await r.json();
+    const text = await r.text();
+    let payload: unknown = null;
+    if (text) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = { error: text };
+      }
+    }
+    if (!r.ok) {
+      throw new Error(errorTextFromPayload(payload, r.status));
+    }
+    return payload;
   } catch (e) {
     console.warn('[ws] session/end failed', e);
-    return null;
+    if (e instanceof Error) throw e;
+    throw new Error('분석 서버에 연결하지 못했습니다.');
   }
 }
 

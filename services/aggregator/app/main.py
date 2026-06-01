@@ -10,7 +10,9 @@ Responsibilities:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import time
 from typing import Optional
 
 import httpx
@@ -34,6 +36,7 @@ from .windowing import WindowingState, close_window
 from .events import build_bundle
 
 COACH_URL = os.environ.get("COACH_URL", "http://coach:8002")
+COACH_TIMEOUT_S = float(os.environ.get("COACH_TIMEOUT_S", "240"))
 
 app = FastAPI(title="Presentation Coach Aggregator")
 app.add_middleware(
@@ -119,14 +122,59 @@ async def session_end(payload: Optional[dict] = None):
     bundle = build_bundle(s)
     end_session()
     # Forward to coach for L3 comprehensive evaluation.
+    bundle_payload = bundle.model_dump(mode="json")
+    payload_kb = len(json.dumps(bundle_payload, ensure_ascii=False).encode("utf-8")) / 1024
+    started = time.perf_counter()
+    print(
+        "[session/end] forwarding bundle "
+        f"session={bundle.session_id} duration={bundle.duration_s:.1f}s "
+        f"events={len(bundle.events)} moments={len(bundle.annotated_moments)} "
+        f"stt={len(bundle.stt_segments)} timeline={len(bundle.score_timeline)} "
+        f"payload={payload_kb:.1f}KB timeout={COACH_TIMEOUT_S:.0f}s",
+        flush=True,
+    )
     try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=COACH_TIMEOUT_S) as client:
             r = await client.post(
                 f"{COACH_URL}/comprehensive",
-                json=bundle.model_dump(mode="json"),
+                json=bundle_payload,
             )
+    except httpx.TimeoutException as e:
+        elapsed = time.perf_counter() - started
+        print(
+            f"[session/end] coach timeout session={bundle.session_id} elapsed={elapsed:.1f}s error={e}",
+            flush=True,
+        )
+        return JSONResponse(
+            {
+                "error": f"coach timeout after {elapsed:.1f}s",
+                "hint": "긴 영상 리포트 생성이 시간 제한을 넘겼습니다.",
+                "duration_s": bundle.duration_s,
+                "event_count": len(bundle.events),
+                "stt_segment_count": len(bundle.stt_segments),
+            },
+            status_code=502,
+        )
     except httpx.HTTPError as e:
-        return JSONResponse({"error": f"coach unreachable: {e}"}, status_code=502)
+        elapsed = time.perf_counter() - started
+        print(
+            f"[session/end] coach unreachable session={bundle.session_id} elapsed={elapsed:.1f}s error={e}",
+            flush=True,
+        )
+        return JSONResponse(
+            {
+                "error": f"coach unreachable: {e}",
+                "duration_s": bundle.duration_s,
+                "event_count": len(bundle.events),
+                "stt_segment_count": len(bundle.stt_segments),
+            },
+            status_code=502,
+        )
+    elapsed = time.perf_counter() - started
+    print(
+        f"[session/end] coach responded session={bundle.session_id} status={r.status_code} elapsed={elapsed:.1f}s",
+        flush=True,
+    )
 
     try:
         report = r.json()
@@ -141,7 +189,13 @@ async def session_end(payload: Optional[dict] = None):
 
     if r.status_code >= 400:
         return JSONResponse(
-            {"coach_status": r.status_code, "coach_response": report},
+            {
+                "coach_status": r.status_code,
+                "coach_response": report,
+                "duration_s": bundle.duration_s,
+                "event_count": len(bundle.events),
+                "stt_segment_count": len(bundle.stt_segments),
+            },
             status_code=502,
         )
 

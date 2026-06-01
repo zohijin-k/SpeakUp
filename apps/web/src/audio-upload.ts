@@ -18,8 +18,9 @@ export async function uploadForAnalysis(
   fd.append('language', language);
   const r = await fetch('/analyze', { method: 'POST', body: fd });
   if (!r.ok) {
-    console.warn('[audio] /analyze HTTP', r.status, await r.text());
-    return null;
+    const detail = await r.text();
+    console.warn('[audio] /analyze HTTP', r.status, detail);
+    throw new Error(detail || `음성 분석 서버가 ${r.status} 상태를 반환했습니다.`);
   }
   return (await r.json()) as AudioAnalysisResult;
 }

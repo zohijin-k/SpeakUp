@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import ValidationError
 
@@ -233,14 +233,168 @@ def _backfill_from_bundle(report: ComprehensiveReport, bundle: SessionBundle) ->
     return report
 
 
+COMPACT_TRANSCRIPT_CHAR_LIMIT = int(os.environ.get("LLM_TRANSCRIPT_CHAR_LIMIT", "6000"))
+COMPACT_TIMELINE_LIMIT = int(os.environ.get("LLM_TIMELINE_LIMIT", "30"))
+COMPACT_MOMENT_LIMIT = int(os.environ.get("LLM_MOMENT_LIMIT", "18"))
+COMPACT_EVENT_LIMIT = int(os.environ.get("LLM_EVENT_LIMIT", "28"))
+COMPACT_SEGMENT_LIMIT = int(os.environ.get("LLM_SEGMENT_LIMIT", "14"))
+
+
+def _round_metric(value: Any, digits: int = 2) -> Any:
+    if isinstance(value, float):
+        return round(value, digits)
+    return value
+
+
+def _sample_evenly(items: list[Any], limit: int) -> list[Any]:
+    if limit <= 0 or len(items) <= limit:
+        return list(items)
+    if limit == 1:
+        return [items[0]]
+    step = (len(items) - 1) / (limit - 1)
+    indices: list[int] = []
+    for i in range(limit):
+        idx = round(i * step)
+        if idx not in indices:
+            indices.append(idx)
+    return [items[i] for i in indices]
+
+
+def _model_value(value: Any) -> str:
+    return getattr(value, "value", str(value))
+
+
+def _compact_transcript(bundle: SessionBundle) -> dict[str, Any]:
+    raw = (bundle.full_transcript or "").strip()
+    limit = max(1000, COMPACT_TRANSCRIPT_CHAR_LIMIT)
+    truncated = len(raw) > limit
+    if truncated:
+        head_len = int(limit * 0.65)
+        tail_len = int(limit * 0.25)
+        text = f"{raw[:head_len].rstrip()}\n...[중간 전사 생략]...\n{raw[-tail_len:].lstrip()}"
+    else:
+        text = raw
+
+    return {
+        "text": text,
+        "char_count": len(raw),
+        "truncated": truncated,
+        "segment_count": len(bundle.stt_segments),
+        "word_count": len(bundle.words),
+        "segment_samples": [
+            {
+                "t_start": round(seg.t_start, 2),
+                "t_end": round(seg.t_end, 2),
+                "text": seg.text,
+            }
+            for seg in _sample_evenly(list(bundle.stt_segments), COMPACT_SEGMENT_LIMIT)
+        ],
+    }
+
+
+def _compact_axis_scores(bundle: SessionBundle) -> list[dict[str, Any]]:
+    return [
+        {
+            "axis": item.axis,
+            "score": round(item.score, 1),
+            "available": item.available,
+            "note": item.note,
+        }
+        for item in bundle.accuracy_per_axis
+    ]
+
+
+def _compact_moments(bundle: SessionBundle) -> list[dict[str, Any]]:
+    ranked = sorted(
+        bundle.annotated_moments,
+        key=lambda moment: (moment.impact >= 0, -abs(moment.impact), moment.t),
+    )[:COMPACT_MOMENT_LIMIT]
+    ranked.sort(key=lambda moment: moment.t)
+    return [
+        {
+            "t": round(moment.t, 2),
+            "duration_s": round(moment.duration_s, 2) if moment.duration_s is not None else None,
+            "axis": moment.axis,
+            "quality": _model_value(moment.quality),
+            "title": moment.title,
+            "impact": moment.impact,
+        }
+        for moment in ranked
+    ]
+
+
+def _compact_events(bundle: SessionBundle) -> list[dict[str, Any]]:
+    sampled = _sample_evenly(
+        sorted(bundle.events, key=lambda item: (item.t_start, item.t_end)),
+        COMPACT_EVENT_LIMIT,
+    )
+    return [
+        {
+            "kind": _model_value(event.kind),
+            "t_start": round(event.t_start, 2),
+            "t_end": round(event.t_end, 2),
+            "text": event.text,
+            "transcript_snippet": event.transcript_snippet,
+            "metrics": {
+                key: _round_metric(value)
+                for key, value in (event.metrics or {}).items()
+            },
+        }
+        for event in sampled
+    ]
+
+
+def _compact_timeline(bundle: SessionBundle) -> list[dict[str, Any]]:
+    return [
+        {
+            "t": round(sample.t, 2),
+            "score": round(sample.score, 1),
+        }
+        for sample in _sample_evenly(list(bundle.score_timeline), COMPACT_TIMELINE_LIMIT)
+    ]
+
+
+def _compact_bundle_for_llm(bundle: SessionBundle) -> dict[str, Any]:
+    return {
+        "session": {
+            "session_id": bundle.session_id,
+            "scenario": bundle.scenario,
+            "duration_s": round(bundle.duration_s, 1),
+            "focus_goals": bundle.focus_goals,
+        },
+        "counts": {
+            "events": len(bundle.events),
+            "annotated_moments": len(bundle.annotated_moments),
+            "score_timeline": len(bundle.score_timeline),
+            "stt_segments": len(bundle.stt_segments),
+            "words": len(bundle.words),
+        },
+        "aggregates": bundle.aggregates.model_dump(mode="json"),
+        "dashboard": {
+            "accuracy_overall": round(bundle.accuracy_overall, 1),
+            "accuracy_per_axis": _compact_axis_scores(bundle),
+            "quality_buckets": bundle.quality_buckets.model_dump(mode="json"),
+            "score_timeline_sample": _compact_timeline(bundle),
+        },
+        "annotated_moments_for_comment": _compact_moments(bundle),
+        "semantic_events_sample": _compact_events(bundle),
+        "transcript": _compact_transcript(bundle),
+        "note": (
+            "긴 영상 안정성을 위해 raw vision frames, full word list, full event list는 생략했습니다. "
+            "출력의 dashboard/subtitle 필드는 서버가 원본 bundle에서 backfill하므로, "
+            "LLM은 요약 신호를 근거로 overall_summary, priorities, coach_comment, training만 작성하세요."
+        ),
+    }
+
+
 def _user_payload(bundle: SessionBundle) -> str:
-    inner = json.dumps(bundle.model_dump(mode="json"), ensure_ascii=False, indent=2)
+    inner = json.dumps(_compact_bundle_for_llm(bundle), ensure_ascii=False, indent=2)
     focus = ", ".join(bundle.focus_goals) if bundle.focus_goals else "없음"
     return (
         f"세션 ID: {bundle.session_id}\n"
         f"길이: {bundle.duration_s:.1f}s\n\n"
         f"사용자 선택 포커스: {focus}\n\n"
-        f"## SessionBundle (구조화 신호)\n```json\n{inner}\n```"
+        f"## CompactSessionBundle (LLM용 요약 신호)\n```json\n{inner}\n```"
     )
 
 

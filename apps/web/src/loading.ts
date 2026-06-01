@@ -236,9 +236,12 @@ async function run() {
     redirectToReport(pending.sessionId);
   } catch (error) {
     console.error('[loading] analysis failed', error);
-    setStatus('분석을 마무리하지 못했어요. 잠시 후 다시 시도해주세요.');
+    const detail = error instanceof Error ? error.message : '';
+    setStatus('분석을 마무리하지 못했어요.');
     if (noteEl) {
-      noteEl.textContent = '창은 그대로 두고, 문제가 반복되면 다시 연습을 시작해주세요.';
+      noteEl.textContent = detail
+        ? `원인: ${detail}`
+        : '창은 그대로 두고, 문제가 반복되면 다시 연습을 시작해주세요.';
     }
   }
 }
