@@ -233,6 +233,8 @@ npm run build
 
 빌드 결과는 `services/audio-pipeline/app/static/`에 생성됩니다. Docker의 `audio` 서비스가 이 정적 파일을 서빙합니다.
 
+빌드 결과물은 저장소에 커밋하지 않습니다. Docker로 정적 웹을 서빙하려면 클론 후 반드시 `npm run build`를 먼저 실행하세요.
+
 ```text
 http://localhost:8000
 ```
@@ -315,3 +317,13 @@ DB 스키마는 `services/audio-pipeline/app/db.py`의 `init_db()`에서 `CREATE
 | MP4 저장 실패 | `audio` 컨테이너에 ffmpeg 설치 여부 및 `/convert/mp4` 로그 확인 |
 | 카메라가 안 보임 | Chrome 카메라 권한과 실제 웹캠 선택 확인 |
 | AI agent 음성이 안 나옴 | 브라우저 TTS 지원 여부와 `음성 켜짐/꺼짐` 상태 확인 |
+
+---
+
+## 12. 라이선스
+
+이 프로젝트는 [MIT License](LICENSE)로 배포됩니다.
+사용한 오픈소스 소프트웨어와 라이선스는 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)를 참고하세요.
+
+기여 방법은 [CONTRIBUTING.md](CONTRIBUTING.md)에 정리되어 있습니다.
+새로운 코칭 시나리오는 `services/coach/rubrics/`에 YAML 파일 하나로 추가할 수 있습니다.
