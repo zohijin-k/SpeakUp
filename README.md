@@ -149,6 +149,7 @@ report.html
 
 ### LLM/STT Provider
 
+- Ollama (로컬 오픈모델, API 키 불필요)
 - Jeonbuk AI API
 - Gemini
 - Claude
@@ -202,6 +203,25 @@ WHISPER_MODEL=medium
 ```
 
 API 키는 `.env`에만 저장하고 커밋하지 않습니다.
+
+### 7-2-1. 완전 로컬 실행 — API 키 없이 (권장 시작 방법)
+
+외부 API 키 없이 100% 오픈소스 스택만으로 전체 기능이 동작합니다.
+LLM은 [Ollama](https://ollama.com)의 로컬 오픈모델, STT는 로컬 faster-whisper를 사용합니다.
+
+```bash
+# 1. Ollama 설치 후 모델 준비 (최초 1회)
+ollama pull gemma3:4b
+
+# 2. .env를 로컬 모드로 설정
+LLM_PROVIDER=ollama
+STT_PROVIDER=local
+```
+
+- 모델은 `OLLAMA_MODEL`로 교체 가능합니다 (예: `qwen3:8b`, `exaone3.5:7.8b`).
+- Docker의 coach 컨테이너는 `host.docker.internal`로 호스트의 Ollama에 접근합니다
+  (docker-compose에 기본 설정되어 있음).
+- 저사양 PC는 `WHISPER_MODEL=small`로 낮추면 STT가 빨라집니다.
 
 ### 7-3. Docker 서비스 실행
 

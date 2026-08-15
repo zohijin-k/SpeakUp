@@ -291,15 +291,10 @@ def _generate_with_gemini(req: AgentTriggerRequest) -> AgentFeedbackResponse:
     return parsed
 
 
-def _generate_with_jeonbuk(req: AgentTriggerRequest) -> AgentFeedbackResponse:
-    """Jeonbuk student-API path (OpenAI-compatible). Uses the same _jeonbuk_chat
-    helper as the comprehensive evaluator so we share the singleton + the
+def _generate_with_openai_compat(req: AgentTriggerRequest, chat) -> AgentFeedbackResponse:
+    """OpenAI-compatible path (Jeonbuk student API, local Ollama). Uses the same
+    chat helpers as the comprehensive evaluator so we share the singleton + the
     json_object fallback for gateways that don't support response_format."""
-    from .llm import _jeonbuk_chat
-
-    if not os.environ.get("JEONBUK_API_KEY"):
-        raise RuntimeError("JEONBUK_API_KEY not set")
-
     # We can't pass a Pydantic response_schema through the OpenAI-compat layer,
     # so we lean on a strict JSON contract in the prompt + Pydantic validation
     # on the way out. The contract here mirrors AgentFeedbackResponse.
@@ -308,7 +303,7 @@ def _generate_with_jeonbuk(req: AgentTriggerRequest) -> AgentFeedbackResponse:
         '{"message": "한 줄 코칭 한국어 텍스트 또는 null", '
         '"tone": "praise" | "nudge" | "critique" | null}'
     )
-    response = _jeonbuk_chat(
+    response = chat(
         [
             {"role": "system", "content": _system_prompt(req)},
             {"role": "user", "content": _user_prompt(req) + json_contract},
@@ -323,7 +318,15 @@ def generate_agent_feedback(req: AgentTriggerRequest) -> AgentFeedbackResponse:
     """Provider-routed agent feedback. Caller wraps in try/except."""
     provider = os.environ.get("LLM_PROVIDER", "gemini").lower().strip()
     if provider == "jeonbuk":
-        result = _generate_with_jeonbuk(req)
+        from .llm import _jeonbuk_chat
+
+        if not os.environ.get("JEONBUK_API_KEY"):
+            raise RuntimeError("JEONBUK_API_KEY not set")
+        result = _generate_with_openai_compat(req, _jeonbuk_chat)
+    elif provider == "ollama":
+        from .llm import _ollama_chat
+
+        result = _generate_with_openai_compat(req, _ollama_chat)
     else:
         result = _generate_with_gemini(req)
     # Trim — models occasionally return "  하세요. " with trailing whitespace.

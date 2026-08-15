@@ -554,10 +554,10 @@ def _get_jeonbuk():
     return _jeonbuk_client
 
 
-def _jeonbuk_chat(messages: list[dict], *, temperature: float = 0.2):
-    client = _get_jeonbuk()
+def _compat_chat(client, model: str, messages: list[dict], *, temperature: float = 0.2):
+    """Shared chat helper for OpenAI-compatible servers (Jeonbuk, Ollama, ...)."""
     kwargs = {
-        "model": JEONBUK_CHAT_MODEL,
+        "model": model,
         "messages": messages,
         "max_tokens": 8000,
         "temperature": temperature,
@@ -574,8 +574,39 @@ def _jeonbuk_chat(messages: list[dict], *, temperature: float = 0.2):
         return client.chat.completions.create(**kwargs)
 
 
-def _repair_jeonbuk_report(bundle: SessionBundle, raw_text: str, error: ValidationError) -> ComprehensiveReport:
-    response = _jeonbuk_chat(
+def _jeonbuk_chat(messages: list[dict], *, temperature: float = 0.2):
+    return _compat_chat(_get_jeonbuk(), JEONBUK_CHAT_MODEL, messages, temperature=temperature)
+
+
+# --------- Ollama — local OpenAI-compatible server, no API key needed ----------
+
+_ollama_client = None
+
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma3:4b")
+
+
+def _get_ollama():
+    global _ollama_client
+    if _ollama_client is None:
+        from openai import OpenAI
+
+        # Ollama ignores the API key, but the OpenAI client requires a value.
+        _ollama_client = OpenAI(
+            base_url=OLLAMA_BASE_URL,
+            api_key=os.environ.get("OLLAMA_API_KEY", "ollama"),
+        )
+    return _ollama_client
+
+
+def _ollama_chat(messages: list[dict], *, temperature: float = 0.2):
+    return _compat_chat(_get_ollama(), OLLAMA_MODEL, messages, temperature=temperature)
+
+
+def _repair_compat_report(
+    bundle: SessionBundle, raw_text: str, error: ValidationError, *, chat=_jeonbuk_chat
+) -> ComprehensiveReport:
+    response = chat(
         [
             {
                 "role": "system",
@@ -602,11 +633,9 @@ def _repair_jeonbuk_report(bundle: SessionBundle, raw_text: str, error: Validati
     return _parse_report_text(response.choices[0].message.content or "")
 
 
-def generate_with_jeonbuk(bundle: SessionBundle) -> ComprehensiveReport:
-    if not os.environ.get("JEONBUK_API_KEY"):
-        raise RuntimeError("JEONBUK_API_KEY not set")
-
-    response = _jeonbuk_chat(
+def _generate_with_compat(bundle: SessionBundle, chat) -> ComprehensiveReport:
+    """Shared comprehensive-report path for OpenAI-compatible providers."""
+    response = chat(
         [
             {"role": "system", "content": _compose_system_prompt(bundle.scenario)},
             {
@@ -620,10 +649,20 @@ def generate_with_jeonbuk(bundle: SessionBundle) -> ComprehensiveReport:
     try:
         parsed = _parse_report_text(content)
     except ValidationError as exc:
-        parsed = _repair_jeonbuk_report(bundle, content, exc)
+        parsed = _repair_compat_report(bundle, content, exc, chat=chat)
     if not parsed.session_id:
         parsed.session_id = bundle.session_id
     return _backfill_from_bundle(parsed, bundle)
+
+
+def generate_with_jeonbuk(bundle: SessionBundle) -> ComprehensiveReport:
+    if not os.environ.get("JEONBUK_API_KEY"):
+        raise RuntimeError("JEONBUK_API_KEY not set")
+    return _generate_with_compat(bundle, _jeonbuk_chat)
+
+
+def generate_with_ollama(bundle: SessionBundle) -> ComprehensiveReport:
+    return _generate_with_compat(bundle, _ollama_chat)
 
 
 # --------- Dispatcher ----------
@@ -638,6 +677,8 @@ def generate(bundle: SessionBundle) -> ComprehensiveReport:
         return generate_with_gemini(bundle)
     if PROVIDER == "jeonbuk":
         return generate_with_jeonbuk(bundle)
+    if PROVIDER == "ollama":
+        return generate_with_ollama(bundle)
     raise RuntimeError(f"unknown LLM_PROVIDER: {PROVIDER!r}")
 
 
@@ -646,4 +687,6 @@ def provider_info() -> dict:
         return {"provider": "claude", "model": CLAUDE_MODEL}
     if PROVIDER == "jeonbuk":
         return {"provider": "jeonbuk", "model": JEONBUK_CHAT_MODEL, "base_url": JEONBUK_BASE_URL}
+    if PROVIDER == "ollama":
+        return {"provider": "ollama", "model": OLLAMA_MODEL, "base_url": OLLAMA_BASE_URL}
     return {"provider": "gemini", "model": GEMINI_MODEL}

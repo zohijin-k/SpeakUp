@@ -65,7 +65,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}      # jeonbuk | gemini | claude
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}      # jeonbuk | gemini | claude | ollama
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
@@ -73,6 +73,12 @@ services:
       JEONBUK_API_KEY: ${JEONBUK_API_KEY:-}
       JEONBUK_BASE_URL: ${JEONBUK_BASE_URL:-https://ai.jb.go.kr/student-api/v1}
       JEONBUK_CHAT_MODEL: ${JEONBUK_CHAT_MODEL:-gemma-4-31b-turbo}
+      # Ollama (호스트에서 실행 중인 로컬 LLM 서버, API 키 불필요)
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma3:4b}
+    extra_hosts:
+      # Linux에서도 host.docker.internal로 호스트의 Ollama에 접근 가능하게
+      - "host.docker.internal:host-gateway"
 
 volumes:
   whisper-cache:
