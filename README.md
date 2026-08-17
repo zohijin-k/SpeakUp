@@ -149,11 +149,13 @@ report.html
 
 ### LLM/STT Provider
 
-- Ollama (로컬 오픈모델, API 키 불필요)
-- Jeonbuk AI API
-- Gemini
-- Claude
-- local faster-whisper fallback
+기본 구성은 **오픈웨이트 모델만 사용**합니다 (Ollama의 Gemma + 로컬 faster-whisper).
+API 키 없이 완전 오픈소스 스택으로 동작하며, 아래는 선택 가능한 대체 provider입니다.
+
+- Ollama (기본 — 로컬 오픈웨이트 모델, API 키 불필요)
+- local faster-whisper (기본 STT — 오픈웨이트)
+- Jeonbuk AI API (오픈웨이트 Gemma 서빙)
+- Gemini / Claude (상용 API — 개발 편의용 선택 옵션)
 
 ---
 

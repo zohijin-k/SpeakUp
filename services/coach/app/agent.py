@@ -316,7 +316,7 @@ def _generate_with_openai_compat(req: AgentTriggerRequest, chat) -> AgentFeedbac
 
 def generate_agent_feedback(req: AgentTriggerRequest) -> AgentFeedbackResponse:
     """Provider-routed agent feedback. Caller wraps in try/except."""
-    provider = os.environ.get("LLM_PROVIDER", "gemini").lower().strip()
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower().strip()
     if provider == "jeonbuk":
         from .llm import _jeonbuk_chat
 

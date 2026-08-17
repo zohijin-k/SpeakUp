@@ -667,7 +667,10 @@ def generate_with_ollama(bundle: SessionBundle) -> ComprehensiveReport:
 
 # --------- Dispatcher ----------
 
-PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
+# Default is ollama (open-weight local model) so the project runs fully on
+# open-source components with no API key — commercial API-only models
+# (Gemini/Claude) are optional convenience providers, never required.
+PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
 
 def generate(bundle: SessionBundle) -> ComprehensiveReport:

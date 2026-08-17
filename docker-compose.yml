@@ -65,7 +65,9 @@ services:
     ports:
       - "8002:8002"
     environment:
-      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}      # jeonbuk | gemini | claude | ollama
+      # 기본값은 ollama(오픈웨이트 로컬 모델) — API 키 없이 완전 오픈소스 스택으로 동작.
+      # gemini/claude 등 상용 API 모델은 개발 편의를 위한 선택 옵션.
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}      # ollama | jeonbuk | gemini | claude
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash-lite}
       CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-sonnet-4-6}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
