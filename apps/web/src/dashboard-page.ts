@@ -1,5 +1,6 @@
-import { average, estimateSessionDuration, getAxisScore, getDisplayAxisScores } from './report-utils';
+import { average, estimateSessionDuration, getDisplayAxisScores } from './report-utils';
 import { getCompletedSessions } from './session-store';
+import { computeGrowth, extractSessionMetrics } from './growth-metrics';
 
 declare const Chart: any;
 
@@ -69,37 +70,84 @@ function renderChart() {
   });
 }
 
+function renderGrowthSummary() {
+  const card = document.getElementById('growth-summary');
+  const grid = document.getElementById('growth-grid');
+  const caption = document.getElementById('growth-caption');
+  if (!card || !grid) return;
+
+  const sessions = getCompletedSessions();
+  const deltas = computeGrowth(sessions);
+  if (deltas.length === 0) return; // 세션 2개 미만 — 카드 숨김 유지
+
+  card.hidden = false;
+  if (caption) caption.textContent = `1회차 → ${sessions.length}회차 실측 비교`;
+  grid.innerHTML = deltas
+    .map((delta) => {
+      const tone = delta.improved === null ? 'is-flat' : delta.improved ? 'is-up' : 'is-down';
+      return `
+        <div class="growth-item ${tone}">
+          <span class="growth-label">${delta.label}</span>
+          <strong class="growth-delta">${delta.deltaText}</strong>
+          <span class="growth-range">${delta.firstText} → ${delta.latestText}</span>
+        </div>
+      `;
+    })
+    .join('');
+}
+
+// 습관 카드 — 실측 지표를 세션별 막대로 (최근 8세션, 과거→최신).
+const HABIT_BAR_COLORS = ['#AFCBFF', '#CDEEE7', '#F3C9D0', '#F6E6A8'];
+
 function renderHabits() {
-  const sessions = getCompletedSessions().slice(0, 3).reverse();
+  const sessions = getCompletedSessions().slice(0, 8).reverse();
+  if (sessions.length === 0) return;
+  const metrics = sessions.map((session) => extractSessionMetrics(session));
+  const latest = metrics[metrics.length - 1];
+
   const configs = [
     {
       key: 'filler',
-      values: sessions.map((session) => {
-        const fillerMoments = session.report.annotated_moments.filter((moment) => /filler|필러/i.test(moment.title)).length;
-        return Math.max(5, 100 - fillerMoments * 20);
-      }),
-      note: sessions.length ? '최근 세션의 필러 안정도를 기준으로 정리했어요.' : '데이터 준비 중',
+      // 필러/분 → 적을수록 좋음: 0회=100, 4회/분 이상=바닥
+      values: metrics.map((m) => (m.fillersPerMin === null ? 0 : Math.max(8, 100 - m.fillersPerMin * 25))),
+      titles: metrics.map((m) => (m.fillersPerMin === null ? '전사 없음' : `${m.fillersPerMin}회/분`)),
+      note: latest.fillersPerMin === null ? '전사 데이터가 없어요.' : `최근 세션 필러 ${latest.fillersPerMin}회/분`,
     },
     {
       key: 'delivery',
-      values: sessions.map((session) => getAxisScore(session.report, 'delivery') ?? 0),
-      note: sessions.length ? '말 속도와 쉼의 리듬 흐름을 함께 봤어요.' : '데이터 준비 중',
+      // 안정 구간(110~160wpm) 근접도
+      values: metrics.map((m) => (m.wpm === null ? 0 : Math.max(8, 100 - Math.abs(m.wpm - 135) * 1.5))),
+      titles: metrics.map((m) => (m.wpm === null ? '전사 없음' : `${m.wpm} wpm`)),
+      note: latest.wpm === null ? '전사 데이터가 없어요.' : `최근 평균 ${latest.wpm} wpm`,
     },
     {
       key: 'gaze',
-      values: sessions.map((session) => getAxisScore(session.report, 'gaze') ?? 0),
-      note: sessions.length ? '카메라 시선 유지 흐름을 기준으로 정리했어요.' : '데이터 준비 중',
+      values: metrics.map((m) => m.gazeScore ?? 0),
+      titles: metrics.map((m) => (m.gazeScore === null ? '측정 없음' : `${Math.round(m.gazeScore)}점`)),
+      note: latest.gazeScore === null ? '시선 데이터가 없어요.' : `최근 시선 안정 ${Math.round(latest.gazeScore)}점`,
+    },
+    {
+      key: 'silence',
+      // 긴 침묵 횟수 → 적을수록 좋음
+      values: metrics.map((m) => Math.max(8, 100 - m.silenceCount * 18)),
+      titles: metrics.map((m) => `긴 침묵 ${m.silenceCount}회`),
+      note: `최근 세션 긴 침묵 ${latest.silenceCount}회`,
     },
   ];
 
   configs.forEach((config) => {
     const card = document.querySelector<HTMLElement>(`[data-habit="${config.key}"]`);
     if (!card) return;
-    const bars = card.querySelectorAll<HTMLElement>('.bar-list i');
-    bars.forEach((bar, index) => {
-      bar.style.height = `${Math.max(0, Math.min(100, config.values[index] ?? 0))}%`;
-      bar.style.background = ['#AFCBFF', '#CDEEE7', '#F3C9D0'][index] || '#AFCBFF';
-    });
+    const list = card.querySelector<HTMLElement>('.bar-list');
+    if (list) {
+      list.innerHTML = config.values
+        .map((value, index) => {
+          const height = Math.max(0, Math.min(100, value));
+          const color = HABIT_BAR_COLORS[index % HABIT_BAR_COLORS.length];
+          return `<i style="height: ${height}%; background: ${color}" title="${index + 1}회차 · ${config.titles[index]}"></i>`;
+        })
+        .join('');
+    }
     const note = card.querySelector<HTMLElement>('p');
     if (note) note.textContent = config.note;
   });
@@ -178,12 +226,22 @@ function renderMetrics() {
   }
 }
 
+// 한 구획이 실패해도(예: 차트 CDN 미로딩) 나머지 구획은 계속 그린다.
+function safe(name: string, fn: () => void) {
+  try {
+    fn();
+  } catch (error) {
+    console.error(`[dashboard] ${name} 렌더 실패`, error);
+  }
+}
+
 function render() {
-  renderMetrics();
-  renderChart();
-  renderHabits();
-  renderScenarioBreakdown();
-  renderRecentSessions();
+  safe('metrics', renderMetrics);
+  safe('growth-summary', renderGrowthSummary);
+  safe('chart', renderChart);
+  safe('habits', renderHabits);
+  safe('scenario', renderScenarioBreakdown);
+  safe('recent', renderRecentSessions);
 }
 
 void render();

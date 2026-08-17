@@ -2268,3 +2268,62 @@ body.agent-session-page .container.app-shell > .app-nav {
     grid-template-columns: 76px 1fr auto;
   }
 }
+
+/* ─── Growth summary — 첫 세션 대비 실측 비교 ─── */
+.growth-summary .panel-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.growth-caption {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+.growth-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.growth-item {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 0.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-strong);
+}
+
+.growth-label {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.growth-delta {
+  font-size: 20px;
+  letter-spacing: -0.01em;
+}
+
+.growth-item.is-up .growth-delta { color: var(--positive); }
+.growth-item.is-down .growth-delta { color: var(--warning); }
+.growth-item.is-flat .growth-delta { color: var(--ink-muted); }
+
+.growth-range {
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+
+/* 습관 카드 4열 (침묵 카드 추가) */
+.habit-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+  .growth-grid,
+  .habit-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
