@@ -1,8 +1,14 @@
 # SpeakUp - AI Agent Communication Coach
 
+[![CI](https://github.com/zohijin-k/SpeakUp/actions/workflows/ci.yml/badge.svg)](https://github.com/zohijin-k/SpeakUp/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 > 🏆 **2026 전북대학교 SW경진대회 장려상** (JBNU Software Competition, Encouragement Award)
 
 SpeakUp은 발표, 면접, 협상, 온라인 대화처럼 중요한 말하기 상황을 **AI agent와 함께 실시간으로 연습**하는 커뮤니케이션 코칭 서비스입니다.
+
+외부 API 키 없이 **100% 오픈소스 스택**(MediaPipe · faster-whisper · Ollama 오픈웨이트 모델)만으로 전체 기능이 동작하며, 코칭 시나리오는 YAML 파일 하나로 누구나 확장할 수 있습니다.
 
 사용자는 세션명과 집중 포커스를 정하고 카메라 앞에서 말합니다. 서비스는 음성, 시선, 자세, 표정, 침묵, 필러 표현 같은 신호를 실시간으로 분석해 짧은 코칭을 띄우고, 사용자의 질문에는 AI agent가 대화형으로 답합니다. 세션이 끝나면 녹화 영상, 주요 주의 구간, 전사 텍스트, 종합 리포트를 통해 다시 복기할 수 있습니다.
 
@@ -36,6 +42,8 @@ SpeakUp은 발표, 면접, 협상, 온라인 대화처럼 중요한 말하기 �
 | STT/운율 분석 | 녹화 오디오를 STT와 prosody 분석으로 변환 | `services/audio-pipeline/app/stt.py`, `services/audio-pipeline/app/prosody.py` |
 | LLM 리포트 | 세션 종료 후 이벤트, 전사, 운율, 비언어 신호를 종합해 구조화 리포트 생성 | `services/coach/app/llm.py`, `services/coach/app/prompts.py` |
 | 리포트 복기 | 주의 구간, 점수 흐름, 전사 텍스트, 영상 재생, PDF 저장 제공 | `apps/web/src/report-page.ts`, `apps/web/src/loading.ts` |
+| 성장 대시보드 | 첫 세션 대비 실측 비교(필러/분, WPM, 시선, 종합 점수)와 세션별 습관 추이 | `apps/web/src/growth-metrics.ts`, `apps/web/src/dashboard-page.ts` |
+| 코칭 시나리오 확장 | YAML 파일 하나로 새 연습 상황(면접, 발표, CS 등) 추가 — 코드 수정 불필요 | `services/coach/rubrics/*.yaml` |
 
 ---
 
