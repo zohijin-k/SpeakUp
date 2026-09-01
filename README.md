@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
-> 🏆 **2026 전북대학교 SW경진대회 장려상** (JBNU Software Competition, Encouragement Award)
+> 🏆 **2026 전북대학교 SW경진대회 동상** (JBNU Software Competition, Encouragement Award)
 
 SpeakUp은 발표, 면접, 협상, 온라인 대화처럼 중요한 말하기 상황을 **AI agent와 함께 실시간으로 연습**하는 커뮤니케이션 코칭 서비스입니다.
 
